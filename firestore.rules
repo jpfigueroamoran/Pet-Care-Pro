@@ -1,0 +1,332 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Función auxiliar: Comprobar si el usuario está autenticado
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Función auxiliar: Comprobar el prefijo de demo basado en el correo del usuario
+    function getPrefix() {
+      return (isAuthenticated() && request.auth.token.email != null && request.auth.token.email.matches('demo\\..*')) ? 'demo_' : '';
+    }
+
+    // Función auxiliar: Comprobar el rol del usuario en sus Custom Claims de JWT o directamente en Firestore
+    function hasRole(role) {
+      return isAuthenticated() && (
+        request.auth.token.role == role || (
+          (getPrefix() == 'demo_' ?
+            (exists(/databases/$(database)/documents/demo_users/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/demo_users/$(request.auth.uid)).data.role == role) :
+            (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role)
+          )
+        )
+      );
+    }
+
+    // FUNCIÓN CRÍTICA: Valida si el veterinario cuenta con un arrendamiento QR vigente para la mascota
+    function hasActiveQRLease(petId, vetId) {
+      return getPrefix() == 'demo_' ? hasActiveQRLeaseDemo(petId, vetId) : hasActiveQRLeaseProd(petId, vetId);
+    }
+
+    function hasActiveQRLeaseProd(petId, vetId) {
+      // Busca un token compuesto en la colección 'qr_tokens' (vetId_petId) que esté activo y vigente
+      return exists(/databases/$(database)/documents/qr_tokens/$(vetId + "_" + petId)) &&
+        get(/databases/$(database)/documents/qr_tokens/$(vetId + "_" + petId)).data.status == 'active' &&
+        get(/databases/$(database)/documents/qr_tokens/$(vetId + "_" + petId)).data.leaseExpiresAt > request.time;
+    }
+
+    function hasActiveQRLeaseDemo(petId, vetId) {
+      // Busca un token compuesto en la colección 'demo_qr_tokens' (vetId_petId) que esté activo y vigente
+      return exists(/databases/$(database)/documents/demo_qr_tokens/$(vetId + "_" + petId)) &&
+        get(/databases/$(database)/documents/demo_qr_tokens/$(vetId + "_" + petId)).data.status == 'active' &&
+        get(/databases/$(database)/documents/demo_qr_tokens/$(vetId + "_" + petId)).data.leaseExpiresAt > request.time;
+    }
+
+    // Reglas para la colección de usuarios producción
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+
+      // Notificaciones del sistema: solo el propio dueño puede leer y marcar como leídas
+      match /notifications/{notifId} {
+        allow read: if isAuthenticated() && request.auth.uid == userId;
+        allow update: if isAuthenticated() && request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      }
+      
+      // Permitir la creación inicial con validación estricta de privilegios
+      allow create: if isAuthenticated() && request.auth.uid == userId && (
+        request.resource.data.role in ['owner', 'vet'] &&
+        request.resource.data.isApprovedVet == false
+      );
+      
+      // Permitir actualizar perfil sin modificar privilegios críticos (role, isApprovedVet, vetStatus, etc.)
+      allow update: if isAuthenticated() && (
+        hasRole('admin') || (
+          request.auth.uid == userId &&
+          !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['role', 'isApprovedVet', 'vetStatus', 'rejectionReason', 'approvedAt', 'rejectedAt'])
+        )
+      );
+      
+      allow delete: if hasRole('admin');
+    }
+
+    // Reglas para la colección de usuarios demo
+    match /demo_users/{userId} {
+      allow read: if isAuthenticated();
+
+      // Notificaciones del sistema: solo el propio dueño puede leer y marcar como leídas
+      match /notifications/{notifId} {
+        allow read: if isAuthenticated() && request.auth.uid == userId;
+        allow update: if isAuthenticated() && request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      }
+      
+      // Permitir la creación inicial con validación estricta de privilegios
+      allow create: if isAuthenticated() && request.auth.uid == userId && (
+        request.resource.data.role in ['owner', 'vet'] &&
+        request.resource.data.isApprovedVet == false
+      );
+      
+      // Permitir actualizar perfil sin modificar privilegios críticos (role, isApprovedVet, vetStatus, etc.)
+      allow update: if isAuthenticated() && (
+        hasRole('admin') || (
+          request.auth.uid == userId &&
+          !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['role', 'isApprovedVet', 'vetStatus', 'rejectionReason', 'approvedAt', 'rejectedAt'])
+        )
+      );
+      
+      allow delete: if hasRole('admin');
+    }
+
+    // Reglas para la colección de mascotas producción
+    match /pets/{petId} {
+      // List queries (colección completa): dueño lista sus mascotas, admin lista todas.
+      allow list: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        hasRole('admin')
+      );
+      // Lectura individual (get): también permite al vet con arrendamiento activo.
+      allow get: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        hasRole('admin') ||
+        hasActiveQRLease(petId, request.auth.uid)
+      );
+      
+      allow create: if isAuthenticated() && (
+        request.resource.data.ownerId == request.auth.uid || 
+        hasRole('admin')
+      );
+      
+      allow update, delete: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid || 
+        hasRole('admin')
+      );
+
+      // Reglas para la cartilla digital de vacunación y desparasitación
+      match /vaccination_card/{entryId} {
+        allow read: if isAuthenticated() && (
+          get(/databases/$(database)/documents/pets/$(petId)).data.ownerId == request.auth.uid ||
+          hasRole('admin') ||
+          hasActiveQRLease(petId, request.auth.uid)
+        );
+        allow create: if isAuthenticated() && (
+          get(/databases/$(database)/documents/pets/$(petId)).data.ownerId == request.auth.uid ||
+          hasRole('admin') ||
+          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+        );
+        allow update: if isAuthenticated() && (
+          hasRole('admin') ||
+          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+        );
+        allow delete: if hasRole('admin');
+      }
+
+      // Reglas para la subcolección sensible: historial clínico
+      match /medical_history/{recordId} {
+        allow read: if isAuthenticated() && (
+          get(/databases/$(database)/documents/pets/$(petId)).data.ownerId == request.auth.uid ||
+          hasRole('admin') ||
+          hasActiveQRLease(petId, request.auth.uid)
+        );
+
+        allow create, update: if isAuthenticated() && (
+          hasRole('admin') ||
+          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+        );
+
+        allow delete: if hasRole('admin');
+      }
+    }
+
+    // Reglas para la colección de mascotas demo
+    match /demo_pets/{petId} {
+      // List queries (colección completa): dueño lista sus mascotas, admin lista todas.
+      allow list: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        hasRole('admin')
+      );
+      // Lectura individual (get): también permite al vet con arrendamiento activo.
+      allow get: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        hasRole('admin') ||
+        hasActiveQRLease(petId, request.auth.uid)
+      );
+      
+      allow create: if isAuthenticated() && (
+        request.resource.data.ownerId == request.auth.uid || 
+        hasRole('admin')
+      );
+      
+      allow update, delete: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid || 
+        hasRole('admin')
+      );
+
+      // Reglas para la cartilla digital de vacunación y desparasitación
+      match /vaccination_card/{entryId} {
+        allow read: if isAuthenticated() && (
+          get(/databases/$(database)/documents/demo_pets/$(petId)).data.ownerId == request.auth.uid ||
+          hasRole('admin') ||
+          hasActiveQRLease(petId, request.auth.uid)
+        );
+        allow create: if isAuthenticated() && (
+          get(/databases/$(database)/documents/demo_pets/$(petId)).data.ownerId == request.auth.uid ||
+          hasRole('admin') ||
+          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+        );
+        allow update: if isAuthenticated() && (
+          hasRole('admin') ||
+          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+        );
+        allow delete: if hasRole('admin');
+      }
+
+      // Reglas para la subcolección sensible: historial clínico
+      match /medical_history/{recordId} {
+        allow read: if isAuthenticated() && (
+          get(/databases/$(database)/documents/demo_pets/$(petId)).data.ownerId == request.auth.uid ||
+          hasRole('admin') ||
+          hasActiveQRLease(petId, request.auth.uid)
+        );
+
+        allow create, update: if isAuthenticated() && (
+          hasRole('admin') ||
+          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+        );
+
+        allow delete: if hasRole('admin');
+      }
+    }
+
+    // Reglas para tokens QR producción
+    match /qr_tokens/{tokenId} {
+      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
+      allow read, update: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        request.auth.uid == resource.data.vetId ||
+        hasRole('admin')
+      );
+      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Reglas para tokens QR demo
+    match /demo_qr_tokens/{tokenId} {
+      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
+      allow read, update: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        request.auth.uid == resource.data.vetId ||
+        hasRole('admin')
+      );
+      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Reglas para pagos / cobros producción
+    match /payments/{paymentId} {
+      allow read: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        resource.data.vetId == request.auth.uid ||
+        hasRole('admin')
+      );
+      allow create: if isAuthenticated() && (
+        hasRole('vet') ||
+        hasRole('admin')
+      );
+      allow update: if isAuthenticated() && (
+        // Dueño sube comprobante SPEI (pending → pending_review ó rejected → pending_review para reintentos)
+        (resource.data.ownerId == request.auth.uid &&
+         resource.data.status in ['pending', 'rejected'] &&
+         request.resource.data.status == 'pending_review' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'comprobanteUrl', 'comprobanteUploadedAt'])) ||
+        // Dueño solicita pago físico (pending → awaiting_physical_payment)
+        (resource.data.ownerId == request.auth.uid &&
+         resource.data.status == 'pending' &&
+         request.resource.data.status == 'awaiting_physical_payment' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'selectedPaymentMethod'])) ||
+        // Veterinario rechaza comprobante (pending_review → rejected)
+        (resource.data.vetId == request.auth.uid &&
+         resource.data.status == 'pending_review' &&
+         request.resource.data.status == 'rejected' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'rejectionReason'])) ||
+        // Veterinario aprueba pago físico (awaiting_physical_payment → paid)
+        (resource.data.vetId == request.auth.uid &&
+         resource.data.status == 'awaiting_physical_payment' &&
+         request.resource.data.status == 'paid' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'paidAt'])) ||
+        // Admin puede todo
+        hasRole('admin')
+      );
+      allow delete: if hasRole('admin');
+    }
+
+    // Reglas para pagos / cobros demo
+    match /demo_payments/{paymentId} {
+      allow read: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        resource.data.vetId == request.auth.uid ||
+        hasRole('admin')
+      );
+      allow create: if isAuthenticated() && (
+        hasRole('vet') ||
+        hasRole('admin')
+      );
+      allow update: if isAuthenticated() && (
+        // Dueño sube comprobante SPEI (pending → pending_review ó rejected → pending_review para reintentos)
+        (resource.data.ownerId == request.auth.uid &&
+         resource.data.status in ['pending', 'rejected'] &&
+         request.resource.data.status == 'pending_review' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'comprobanteUrl', 'comprobanteUploadedAt'])) ||
+        // Dueño solicita pago físico (pending → awaiting_physical_payment)
+        (resource.data.ownerId == request.auth.uid &&
+         resource.data.status == 'pending' &&
+         request.resource.data.status == 'awaiting_physical_payment' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'selectedPaymentMethod'])) ||
+        // Veterinario rechaza comprobante (pending_review → rejected)
+        (resource.data.vetId == request.auth.uid &&
+         resource.data.status == 'pending_review' &&
+         request.resource.data.status == 'rejected' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'rejectionReason'])) ||
+        // Veterinario aprueba pago físico (awaiting_physical_payment → paid)
+        (resource.data.vetId == request.auth.uid &&
+         resource.data.status == 'awaiting_physical_payment' &&
+         request.resource.data.status == 'paid' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'paidAt'])) ||
+        // Admin puede todo
+        hasRole('admin')
+      );
+      allow delete: if hasRole('admin');
+    }
+  }
+}
