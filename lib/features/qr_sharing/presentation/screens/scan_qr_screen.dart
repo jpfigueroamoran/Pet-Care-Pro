@@ -87,10 +87,90 @@ class _ScanQRScreenState extends ConsumerState<ScanQRScreen> {
         _handleValidationError('Respuesta del servidor no válida.');
       }
     } on FirebaseFunctionsException catch (e) {
-      _handleValidationError(e.message ?? 'Error de validación en el servidor.');
+      if (e.code == 'resource-exhausted') {
+        _handlePatientLimitReached(e.message ?? 'Límite de pacientes activos alcanzado.');
+      } else {
+        _handleValidationError(e.message ?? 'Error de validación en el servidor.');
+      }
     } catch (e) {
       _handleValidationError('Error de red al validar pase QR: $e');
     }
+  }
+
+  void _handlePatientLimitReached(String message) {
+    if (!mounted) return;
+    HapticFeedback.heavyImpact();
+    setState(() {
+      _hasScanned = false;
+      _isValidating = false;
+    });
+    try { _controller.start(); } catch (_) {}
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.workspace_premium, color: AppTheme.goldChampagne),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Límite Alcanzado',
+                style: TextStyle(color: AppTheme.textPrimary, fontSize: 17),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(message, style: const TextStyle(color: AppTheme.textMuted, height: 1.5)),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppTheme.goldChampagne.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppTheme.goldChampagne.withValues(alpha: 0.3)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.star, color: AppTheme.goldChampagne, size: 16),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Actualiza a Básico (25 pacientes) o Profesional/Premium (ilimitados).',
+                      style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cerrar', style: TextStyle(color: AppTheme.textMuted)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              context.push('/vet-subscription');
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.goldChampagne,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+            child: const Text('Ver Planes', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
   }
 
   void _handleValidationError(String message) {

@@ -146,7 +146,7 @@ class _VetDirectoryScreenState extends ConsumerState<VetDirectoryScreen> {
 
       final pos = await Geolocator.getCurrentPosition(
         locationSettings:
-            const LocationSettings(accuracy: LocationAccuracy.balanced),
+            const LocationSettings(accuracy: LocationAccuracy.medium),
       );
       if (mounted) {
         setState(() => _ownerPosition = pos);

@@ -7,6 +7,8 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/utils/firestore_extension.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
 import '../../../auth/domain/entities/user_entity.dart';
+import '../../../subscriptions/presentation/providers/subscription_provider.dart';
+import '../../../subscriptions/domain/entities/subscription_tier.dart';
 import '../../../pets/domain/entities/pet_entity.dart';
 import '../../domain/entities/payment_entity.dart';
 import '../../data/repositories/payment_repository.dart';
@@ -36,6 +38,7 @@ class _CreateChargeScreenState extends ConsumerState<CreateChargeScreen> {
     final user = ref.watch(currentUserProvider);
     final petAsync = ref.watch(singlePetFutureProvider(widget.petId));
     final services = user?.services ?? [];
+    final subscriptionTier = ref.watch(subscriptionTierProvider);
 
     return Scaffold(
       backgroundColor: AppTheme.background,
@@ -272,6 +275,32 @@ class _CreateChargeScreenState extends ConsumerState<CreateChargeScreen> {
                           ],
                         ),
                         const SizedBox(height: 16),
+                        if (!subscriptionTier.canUseAllPaymentMethods)
+                          GestureDetector(
+                            onTap: () => context.push('/vet-subscription'),
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 12),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: AppTheme.goldChampagne.withValues(alpha: 0.08),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: AppTheme.goldChampagne.withValues(alpha: 0.35)),
+                              ),
+                              child: const Row(
+                                children: [
+                                  Icon(Icons.lock_outline, color: AppTheme.goldChampagne, size: 15),
+                                  SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      'Plan gratuito: solo efectivo disponible. Actualiza para habilitar SPEI y terminal.',
+                                      style: TextStyle(color: AppTheme.goldChampagne, fontSize: 11),
+                                    ),
+                                  ),
+                                  Icon(Icons.chevron_right, color: AppTheme.goldChampagne, size: 15),
+                                ],
+                              ),
+                            ),
+                          ),
                         ElevatedButton(
                           onPressed: _selectedServiceIds.isEmpty || _isLoading
                               ? null
@@ -291,11 +320,17 @@ class _CreateChargeScreenState extends ConsumerState<CreateChargeScreen> {
                                       totalAmount: totalAmount,
                                       status: 'pending',
                                       createdAt: DateTime.now(),
-                                      allowedPaymentMethods: {
-                                        'spei': user.acceptsSpei,
-                                        'cash': user.acceptsCash,
-                                        'terminal': user.acceptsCardTerminal,
-                                      },
+                                      allowedPaymentMethods: subscriptionTier.canUseAllPaymentMethods
+                                        ? {
+                                            'spei': user.acceptsSpei,
+                                            'cash': user.acceptsCash,
+                                            'terminal': user.acceptsCardTerminal,
+                                          }
+                                        : {
+                                            'spei': false,
+                                            'cash': true,
+                                            'terminal': false,
+                                          },
                                     );
 
                                     await ref.read(paymentRepositoryProvider).createPayment(newPayment);

@@ -255,6 +255,23 @@ exports.validateQrLease = (0, https_1.onCall)(async (request) => {
     if (callerUid !== vetId && !isAdmin) {
         throw new https_1.HttpsError("permission-denied", "Inconsistencia en la identificación del veterinario.");
     }
+    // 2.5 Verificar límite de pacientes activos según tier de suscripción
+    if (!isAdmin) {
+        const vetProfileDoc = await getCol("users", request.auth).doc(callerUid).get();
+        const subscriptionTier = vetProfileDoc.data()?.subscriptionTier || "free";
+        const maxActivePatients = subscriptionTier === "free" ? 5 :
+            subscriptionTier === "basico" ? 25 :
+                999999; // trial, profesional, premium = ilimitado
+        if (maxActivePatients < 999999) {
+            const activeSnap = await getCol("qr_tokens", request.auth)
+                .where("vetId", "==", callerUid)
+                .where("status", "==", "active")
+                .get();
+            if (activeSnap.size >= maxActivePatients) {
+                throw new https_1.HttpsError("resource-exhausted", `Has alcanzado el límite de ${maxActivePatients} pacientes activos de tu plan. Actualiza tu suscripción para continuar.`);
+            }
+        }
+    }
     try {
         // 3. Buscar el token en Firestore
         const tokenRef = getCol("qr_tokens", request.auth).doc(tokenId);
