@@ -1,9 +1,11 @@
+import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/utils/firestore_extension.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
@@ -66,83 +68,182 @@ class _OwnerDashboardScreenState extends ConsumerState<OwnerDashboardScreen> {
     final nameController = TextEditingController(text: pet.name);
     final breedController = TextEditingController(text: pet.breed);
     final ageController = TextEditingController(text: pet.age.toString());
+    final allergiesController = TextEditingController(text: pet.allergies.join(', '));
+    final conditionsController = TextEditingController(text: pet.chronicConditions.join(', '));
+
+    XFile? dialogImageFile;
+    Uint8List? dialogImageBytes;
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppTheme.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        title: Row(
-          children: [
-            const Icon(Icons.edit_outlined, color: AppTheme.mintGreen),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Editar: ${pet.name}',
-                style: const TextStyle(
-                    color: AppTheme.textPrimary,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          Future<void> pickDialogImage() async {
+            final picker = ImagePicker();
+            try {
+              final image = await picker.pickImage(
+                source: ImageSource.gallery,
+                maxWidth: 800,
+                maxHeight: 800,
+                imageQuality: 85,
+              );
+              if (image != null) {
+                final bytes = await image.readAsBytes();
+                setDialogState(() {
+                  dialogImageFile = image;
+                  dialogImageBytes = bytes;
+                });
+              }
+            } catch (e) {
+              debugPrint('Error al seleccionar imagen: $e');
+            }
+          }
+
+          return AlertDialog(
+            backgroundColor: AppTheme.surface,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+            title: Row(
+              children: [
+                const Icon(Icons.edit_outlined, color: AppTheme.mintGreen),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Editar: ${pet.name}',
+                    style: const TextStyle(
+                        color: AppTheme.textPrimary,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Center(
+                    child: Stack(
+                      children: [
+                        GestureDetector(
+                          onTap: pickDialogImage,
+                          child: Container(
+                            width: 100,
+                            height: 100,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                  color: AppTheme.mintGreen.withValues(alpha: 0.8),
+                                  width: 2.5),
+                              image: dialogImageBytes != null
+                                  ? DecorationImage(
+                                      image: MemoryImage(dialogImageBytes!),
+                                      fit: BoxFit.cover)
+                                  : DecorationImage(
+                                      image: NetworkImage(pet.photoUrl),
+                                      fit: BoxFit.cover),
+                              color: AppTheme.surfaceVariant,
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          bottom: 0,
+                          right: 0,
+                          child: GestureDetector(
+                            onTap: pickDialogImage,
+                            child: Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: const BoxDecoration(
+                                color: AppTheme.mintGreen,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(Icons.camera_alt,
+                                  color: Colors.white, size: 14),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _dialogField(nameController, 'Nombre'),
+                  const SizedBox(height: 16),
+                  _dialogField(breedController, 'Raza'),
+                  const SizedBox(height: 16),
+                  _dialogField(ageController, 'Edad (meses)', isNumber: true),
+                  const SizedBox(height: 16),
+                  _dialogField(allergiesController, 'Alergias (separadas por coma)'),
+                  const SizedBox(height: 16),
+                  _dialogField(conditionsController, 'Condiciones Crónicas (separadas por coma)'),
+                ],
               ),
             ),
-          ],
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _dialogField(nameController, 'Nombre'),
-              const SizedBox(height: 16),
-              _dialogField(breedController, 'Raza'),
-              const SizedBox(height: 16),
-              _dialogField(ageController, 'Edad (meses)', isNumber: true),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('CANCELAR',
+                    style: TextStyle(color: AppTheme.textMuted)),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  try {
+                    String photoUrl = pet.photoUrl;
+                    if (dialogImageBytes != null && dialogImageFile != null) {
+                      final fileName = '${DateTime.now().millisecondsSinceEpoch}_${dialogImageFile!.name}';
+                      final repository = ref.read(petRepositoryProvider);
+                      photoUrl = await repository.uploadPetPhoto(pet.ownerId, fileName, dialogImageBytes!);
+                    }
+
+                    final updated = pet.copyWith(
+                      name: nameController.text.trim(),
+                      breed: breedController.text.trim(),
+                      age: int.tryParse(ageController.text.trim()) ?? pet.age,
+                      photoUrl: photoUrl,
+                      allergies: allergiesController.text.trim().isNotEmpty
+                          ? allergiesController.text
+                              .split(',')
+                              .map((e) => e.trim())
+                              .toList()
+                          : [],
+                      chronicConditions: conditionsController.text.trim().isNotEmpty
+                          ? conditionsController.text
+                              .split(',')
+                              .map((e) => e.trim())
+                              .toList()
+                          : [],
+                    );
+
+                    await ref.read(petRepositoryProvider).updatePet(updated);
+                    if (ctx.mounted) {
+                      Navigator.pop(ctx);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('¡${updated.name} actualizada con éxito! 🐾'),
+                          backgroundColor: AppTheme.mintGreen,
+                        ),
+                      );
+                    }
+                  } catch (e) {
+                    if (ctx.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Error al actualizar: $e'),
+                          backgroundColor: AppTheme.coralRed,
+                        ),
+                      );
+                    }
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.mintGreen,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('GUARDAR',
+                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              ),
             ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('CANCELAR',
-                style: TextStyle(color: AppTheme.textMuted)),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              final updated = pet.copyWith(
-                name: nameController.text.trim(),
-                breed: breedController.text.trim(),
-                age: int.tryParse(ageController.text.trim()) ?? pet.age,
-              );
-              try {
-                await ref.read(petRepositoryProvider).updatePet(updated);
-                if (ctx.mounted) {
-                  Navigator.pop(ctx);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('¡${updated.name} actualizada!'),
-                      backgroundColor: AppTheme.mintGreen,
-                    ),
-                  );
-                }
-              } catch (e) {
-                if (ctx.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Error al actualizar: $e'),
-                      backgroundColor: AppTheme.coralRed,
-                    ),
-                  );
-                }
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppTheme.mintGreen,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
-            ),
-            child: const Text('GUARDAR',
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          ),
-        ],
+          );
+        },
       ),
     );
   }
@@ -448,6 +549,70 @@ class _OwnerDashboardScreenState extends ConsumerState<OwnerDashboardScreen> {
                         ),
                       ),
                       Icon(Icons.chevron_right, color: Colors.white70, size: 20),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // ── Mis Reservas de Guardería ──────────────────────────────────
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+              child: GestureDetector(
+                onTap: () => context.push('/owner-reservations'),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: AppTheme.surface,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: AppTheme.mintGreen.withValues(alpha: 0.35)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppTheme.mintGreen.withValues(alpha: 0.08),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: AppTheme.mintGreen.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(Icons.home_work_outlined,
+                            color: AppTheme.mintGreen, size: 22),
+                      ),
+                      const SizedBox(width: 14),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Mis Reservas de Guardería',
+                              style: TextStyle(
+                                color: AppTheme.textPrimary,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                            SizedBox(height: 2),
+                            Text(
+                              'Ver estado de estancias y reagendar',
+                              style: TextStyle(
+                                color: AppTheme.textMuted,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.chevron_right,
+                          color: AppTheme.textMuted, size: 20),
                     ],
                   ),
                 ),

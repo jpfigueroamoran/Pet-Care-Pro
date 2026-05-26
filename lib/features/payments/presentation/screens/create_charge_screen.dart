@@ -8,7 +8,6 @@ import '../../../../core/utils/firestore_extension.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
 import '../../../auth/domain/entities/user_entity.dart';
 import '../../../subscriptions/presentation/providers/subscription_provider.dart';
-import '../../../subscriptions/domain/entities/subscription_tier.dart';
 import '../../../pets/domain/entities/pet_entity.dart';
 import '../../domain/entities/payment_entity.dart';
 import '../../data/repositories/payment_repository.dart';

@@ -174,10 +174,10 @@ class _ShareQRScreenState extends ConsumerState<ShareQRScreen> {
     final pet = petsAsync.when(
       data: (list) => list.firstWhere(
         (e) => e.id == widget.petId,
-        orElse: () => PetEntity(id: 'unknown', name: 'Mascota', species: '', breed: '', age: 0, photoUrl: '', ownerId: '', createdAt: DateTime.now()),
+        orElse: () => PetEntity(id: 'unknown', name: 'Mascota', species: '', breed: '', age: 0, photoUrl: '', ownerId: '', branchId: '', createdAt: DateTime.now()),
       ),
-      loading: () => PetEntity(id: 'loading', name: 'Cargando...', species: '', breed: '', age: 0, photoUrl: '', ownerId: '', createdAt: DateTime.now()),
-      error: (_, __) => PetEntity(id: 'error', name: 'Error', species: '', breed: '', age: 0, photoUrl: '', ownerId: '', createdAt: DateTime.now()),
+      loading: () => PetEntity(id: 'loading', name: 'Cargando...', species: '', breed: '', age: 0, photoUrl: '', ownerId: '', branchId: '', createdAt: DateTime.now()),
+      error: (_, __) => PetEntity(id: 'error', name: 'Error', species: '', breed: '', age: 0, photoUrl: '', ownerId: '', branchId: '', createdAt: DateTime.now()),
     );
 
     final isUnlimited = _durationMinutes == null;

@@ -14,7 +14,9 @@ extension FirestoreCollectionExtension on FirebaseFirestore {
       final segments = path.split('/');
       if (segments.isNotEmpty) {
         final root = segments[0];
-        if (root == 'users' || root == 'pets' || root == 'payments' || root == 'qr_tokens') {
+        if (root == 'users' || root == 'pets' || root == 'payments' ||
+          root == 'qr_tokens' || root == 'boarding_reservations' ||
+          root == 'pending_links') {
           segments[0] = 'demo_$root';
         }
       }

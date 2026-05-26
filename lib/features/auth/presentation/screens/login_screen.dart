@@ -15,6 +15,9 @@ class LoginScreen extends ConsumerStatefulWidget {
 }
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
+  // Configuración de Entorno: Cambiar a 'true' para habilitar el panel de inversionistas/demo
+  static const bool _showDemoPanel = false;
+
   final _formKey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
@@ -339,97 +342,99 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           ),
                         ),
 
-                        const Divider(height: 40, color: AppTheme.border),
-                        
-                        // Panel de Demostración para Inversionistas
-                        Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [
-                                AppTheme.mintGreen.withOpacity(0.04),
-                                AppTheme.skyBlue.withOpacity(0.04),
+                        if (_showDemoPanel) ...[
+                          const Divider(height: 40, color: AppTheme.border),
+                          
+                          // Panel de Demostración para Inversionistas
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  AppTheme.mintGreen.withValues(alpha: 0.04),
+                                  AppTheme.skyBlue.withValues(alpha: 0.04),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppTheme.mintGreen.withValues(alpha: 0.12),
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                const Row(
+                                  children: [
+                                    Icon(
+                                      Icons.insights_outlined,
+                                      color: AppTheme.mintGreen,
+                                      size: 18,
+                                    ),
+                                    SizedBox(width: 8),
+                                    Text(
+                                      'DEMO',
+                                      style: TextStyle(
+                                        color: AppTheme.mintGreen,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 11,
+                                        letterSpacing: 1.0,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 6),
+                                const Text(
+                                  'Explora cada dashboard con datos precargados y permisos totalmente listos en un solo toque:',
+                                  style: TextStyle(
+                                    color: AppTheme.textMuted,
+                                    fontSize: 10,
+                                    height: 1.4,
+                                  ),
+                                ),
+                                const SizedBox(height: 16),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: _demoButton(
+                                        context,
+                                        ref,
+                                        role: UserRole.owner,
+                                        label: 'Dueño',
+                                        icon: Icons.person_outline,
+                                        color: AppTheme.mintGreen,
+                                        isLoading: authState.isLoading,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: _demoButton(
+                                        context,
+                                        ref,
+                                        role: UserRole.vet,
+                                        label: 'Vet',
+                                        icon: Icons.medical_services_outlined,
+                                        color: AppTheme.skyBlue,
+                                        isLoading: authState.isLoading,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: _demoButton(
+                                        context,
+                                        ref,
+                                        role: UserRole.admin,
+                                        label: 'Admin',
+                                        icon: Icons.shield_outlined,
+                                        color: AppTheme.goldChampagne,
+                                        isLoading: authState.isLoading,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ],
                             ),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: AppTheme.mintGreen.withOpacity(0.12),
-                            ),
                           ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              const Row(
-                                children: [
-                                  Icon(
-                                    Icons.insights_outlined,
-                                    color: AppTheme.mintGreen,
-                                    size: 18,
-                                  ),
-                                  SizedBox(width: 8),
-                                  Text(
-                                    'DEMO',
-                                    style: TextStyle(
-                                      color: AppTheme.mintGreen,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 11,
-                                      letterSpacing: 1.0,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 6),
-                              const Text(
-                                'Explora cada dashboard con datos precargados y permisos totalmente listos en un solo toque:',
-                                style: TextStyle(
-                                  color: AppTheme.textMuted,
-                                  fontSize: 10,
-                                  height: 1.4,
-                                ),
-                              ),
-                              const SizedBox(height: 16),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: _demoButton(
-                                      context,
-                                      ref,
-                                      role: UserRole.owner,
-                                      label: 'Dueño',
-                                      icon: Icons.person_outline,
-                                      color: AppTheme.mintGreen,
-                                      isLoading: authState.isLoading,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: _demoButton(
-                                      context,
-                                      ref,
-                                      role: UserRole.vet,
-                                      label: 'Vet',
-                                      icon: Icons.medical_services_outlined,
-                                      color: AppTheme.skyBlue,
-                                      isLoading: authState.isLoading,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: _demoButton(
-                                      context,
-                                      ref,
-                                      role: UserRole.admin,
-                                      label: 'Admin',
-                                      icon: Icons.shield_outlined,
-                                      color: AppTheme.goldChampagne,
-                                      isLoading: authState.isLoading,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
+                        ],
                       ],
                     ),
                   ),

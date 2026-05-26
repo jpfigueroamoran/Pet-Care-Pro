@@ -87,3 +87,20 @@ final singlePetStreamProvider = StreamProvider.family<PetEntity?, String>((ref, 
       .snapshots()
       .map((snap) => snap.exists ? PetEntity.fromMap(snap.data()!, snap.id) : null);
 });
+
+// Proveedor reactivo de todas las mascotas asociadas a una sucursal en particular, ordenadas en memoria
+final branchPetsStreamProvider = StreamProvider.family<List<PetEntity>, String>((ref, branchId) {
+  return FirebaseFirestore.instance
+      .demoCollection('pets')
+      .where('branchId', isEqualTo: branchId)
+      .snapshots()
+      .map((snapshot) {
+        final pets = snapshot.docs
+            .map((doc) => PetEntity.fromMap(doc.data(), doc.id))
+            .toList();
+        // Ordenamiento seguro en memoria
+        pets.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        return pets;
+      });
+});
+

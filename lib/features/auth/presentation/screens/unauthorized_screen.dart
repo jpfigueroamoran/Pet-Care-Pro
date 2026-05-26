@@ -73,6 +73,15 @@ class UnauthorizedScreen extends ConsumerWidget {
                         case UserRole.vet:
                           context.go('/vet-dashboard');
                           break;
+                        case UserRole.groomer:
+                          context.go('/groomer-dashboard');
+                          break;
+                        case UserRole.caretaker:
+                          context.go('/caretaker-dashboard');
+                          break;
+                        case UserRole.receptionist:
+                          context.go('/receptionist-dashboard');
+                          break;
                         case UserRole.admin:
                           context.go('/admin-dashboard');
                           break;

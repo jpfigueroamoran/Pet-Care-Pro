@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.checkSubscriptionExpiry = exports.mercadoPagoWebhook = exports.createMercadoPagoSubscription = exports.vaccinationReminders = exports.onQrLeaseActivatedDemo = exports.onQrLeaseActivated = exports.cleanupExpiredLeases = exports.setupDemoUser = exports.revokeVetAccess = exports.approveComprobante = exports.validateQrLease = exports.generateQrToken = exports.onUserProfileUpdatedDemo = exports.onUserProfileUpdatedV2 = exports.onUserProfileCreatedDemo = exports.onUserProfileCreatedV2 = void 0;
+exports.registerBranchStaff = exports.linkPetToOwner = exports.calculateServiceDuration = exports.checkSubscriptionExpiry = exports.mercadoPagoWebhook = exports.createMercadoPagoSubscription = exports.vaccinationReminders = exports.onQrLeaseActivatedDemo = exports.onQrLeaseActivated = exports.cleanupExpiredLeases = exports.setupDemoUser = exports.revokeVetAccess = exports.approveComprobante = exports.validateQrLease = exports.generateQrToken = exports.onUserProfileUpdatedDemo = exports.onUserProfileUpdatedV2 = exports.onUserProfileCreatedDemo = exports.onUserProfileCreatedV2 = void 0;
 const admin = require("firebase-admin");
 const https_1 = require("firebase-functions/v2/https");
 const firestore_1 = require("firebase-functions/v2/firestore");
@@ -26,9 +26,18 @@ function getCol(colName, auth) {
  * basándose en su documento de perfil en Firestore.
  */
 async function syncUserClaims(uid, role, isApprovedVet) {
+    // v1.1.0: RBAC Fluido — los claims granulares se derivan del rol + estado de aprobación.
+    // canPerformMedical: vets aprobados y admins pueden acceder a registros médicos/conductuales.
+    // canPerformServices: vets aprobados y admins pueden acceder a datos de estética/guardería.
+    // isAdmin: acceso total, incluyendo edición/borrado de evaluaciones conductuales.
+    const isVetApproved = role === "vet" && (isApprovedVet === true);
+    const isAdminRole = role === "admin";
     const claims = {
         role: role,
         isApprovedVet: isApprovedVet || false,
+        canPerformMedical: isVetApproved || isAdminRole,
+        canPerformServices: isVetApproved || isAdminRole,
+        isAdmin: isAdminRole,
     };
     await auth.setCustomUserClaims(uid, claims);
     console.log(`[RBAC] Custom Claims actualizados para ${uid}:`, claims);
@@ -1179,5 +1188,301 @@ exports.checkSubscriptionExpiry = (0, scheduler_1.onSchedule)({ schedule: "every
     allExpired.forEach((doc) => batch.update(doc.ref, { subscriptionTier: "free" }));
     await batch.commit();
     console.log(`[Subscription] ${allExpired.length} prueba(s) expirada(s) → downgraded a free.`);
+});
+// =============================================================================
+// v1.1.0 — BOARDING / GROOMING ENGINE
+// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS MPT (Motor de Productividad de Tiempos) — espejo del Dart use case
+// ─────────────────────────────────────────────────────────────────────────────
+function mptBaseMinutes(size) {
+    switch (size.toUpperCase()) {
+        case "TOY": return 45;
+        case "SMALL": return 60;
+        case "LARGE": return 90;
+        case "GIANT": return 120;
+        default: return 75; // MEDIUM
+    }
+}
+function mptCoatMultiplier(coatType) {
+    switch (coatType.toUpperCase()) {
+        case "LONG": return 1.5;
+        case "DOUBLE_COAT": return 1.7;
+        case "CURLY": return 1.6;
+        case "MEDIUM": return 1.2;
+        default: return 1.0; // SHORT
+    }
+}
+function mptCoatConditionPenalty(coatCondition) {
+    return coatCondition.toUpperCase() === "MATTED" ? 30 : 0;
+}
+function mptBathPenalty(sensitivity) {
+    switch (sensitivity) {
+        case "anxious": return 10;
+        case "defensive": return 25;
+        default: return 0; // cooperative
+    }
+}
+function mptDryingPenalty(sensitivity) {
+    switch (sensitivity) {
+        case "medium": return 15;
+        case "highPanic":
+        case "high_panic": return 45;
+        default: return 0; // low
+    }
+}
+function mptNailInfo(nailTrimming) {
+    switch (nailTrimming) {
+        case "needsMuzzle":
+        case "needs_muzzle": return { penalty: 10, canPerform: true };
+        case "sedationRequired":
+        case "sedation_required": return { penalty: 0, canPerform: false };
+        default: return { penalty: 0, canPerform: true }; // cooperative
+    }
+}
+function computeMPT(input) {
+    const base = mptBaseMinutes(input.sizeCategory);
+    const afterCoat = Math.round(base * mptCoatMultiplier(input.coatType));
+    const afterMat = afterCoat + mptCoatConditionPenalty(input.coatCondition);
+    const ht = input.handlingTolerance;
+    const bathPen = ht ? mptBathPenalty(ht.bathSensitivity) : 0;
+    const dryPen = ht ? mptDryingPenalty(ht.dryingSensitivity) : 0;
+    const nailInfo = ht ? mptNailInfo(ht.nailTrimming) : { penalty: 0, canPerform: true };
+    const total = afterMat + bathPen + dryPen + nailInfo.penalty;
+    const isGiant = input.sizeCategory.toUpperCase() === "GIANT";
+    const isHighRisk = ["orange", "red"].includes(input.riskLevel.toLowerCase());
+    const requiresVetSupervision = input.riskLevel.toLowerCase() === "red";
+    let staffUnits = isGiant ? 2 : 1;
+    if (isHighRisk)
+        staffUnits++;
+    const penaltyReasons = [];
+    if (input.coatType.toUpperCase() !== "SHORT") {
+        penaltyReasons.push(`Pelaje ${input.coatType}: ×${mptCoatMultiplier(input.coatType)} sobre base`);
+    }
+    if (input.coatCondition.toUpperCase() === "MATTED") {
+        penaltyReasons.push("Pelaje enmarañado: +30 min de desanudado");
+    }
+    if (bathPen > 0)
+        penaltyReasons.push(`Sensibilidad al baño (${ht.bathSensitivity}): +${bathPen} min`);
+    if (dryPen > 0)
+        penaltyReasons.push(`Sensibilidad al secado (${ht.dryingSensitivity}): +${dryPen} min`);
+    if (!nailInfo.canPerform)
+        penaltyReasons.push("Uñas: requiere coordinación clínica");
+    if (requiresVetSupervision)
+        penaltyReasons.push("Nivel de riesgo ROJO: supervisión veterinaria simultánea");
+    return {
+        estimatedMinutes: total,
+        staffUnitsRequired: staffUnits,
+        requiresVetSupervision,
+        canPerformNailTrimming: nailInfo.canPerform,
+        penaltyReasons,
+    };
+}
+exports.calculateServiceDuration = (0, https_1.onCall)(async (request) => {
+    if (!request.auth) {
+        throw new https_1.HttpsError("unauthenticated", "El usuario debe estar autenticado.");
+    }
+    const claims = request.auth.token;
+    if (!claims.canPerformServices && !claims.canPerformMedical && !claims.isAdmin) {
+        throw new https_1.HttpsError("permission-denied", "Solo el staff puede calcular duraciones de servicio.");
+    }
+    const { petId, serviceType } = request.data;
+    if (!petId) {
+        throw new https_1.HttpsError("invalid-argument", "El campo 'petId' es obligatorio.");
+    }
+    if (!["bath", "haircut"].includes(serviceType)) {
+        throw new https_1.HttpsError("invalid-argument", "El campo 'serviceType' debe ser 'bath' o 'haircut'.");
+    }
+    // ── 1. Datos físicos de la mascota ──────────────────────────────────────
+    const petDoc = await getCol("pets", request.auth).doc(petId).get();
+    if (!petDoc.exists) {
+        throw new https_1.HttpsError("not-found", `Mascota '${petId}' no encontrada.`);
+    }
+    const pet = petDoc.data();
+    // Aislamiento Multi-tenant por sucursal
+    const staffBranchId = claims.branchId;
+    const petBranchId = pet.branchId;
+    if (staffBranchId && petBranchId && staffBranchId !== petBranchId) {
+        throw new https_1.HttpsError("permission-denied", "No tienes acceso a los datos de esta mascota (pertenece a otra sucursal).");
+    }
+    const weightKg = pet.weightKg ?? 0;
+    const coatType = pet.coatType ?? "SHORT";
+    const coatCondition = pet.coatCondition ?? "NORMAL";
+    const rawSize = pet.sizeCategory;
+    // Derivar sizeCategory desde peso si no está explícita en el documento
+    const sizeCategory = rawSize ?? (() => {
+        if (weightKg < 4)
+            return "TOY";
+        if (weightKg < 10)
+            return "SMALL";
+        if (weightKg < 25)
+            return "MEDIUM";
+        if (weightKg < 45)
+            return "LARGE";
+        return "GIANT";
+    })();
+    // ── 2. Evaluación conductual más reciente ────────────────────────────────
+    // La subcolección es confidencial; Admin SDK la lee sin restricciones de reglas.
+    const assessSnap = await getCol("pets", request.auth)
+        .doc(petId)
+        .collection("behavioral_assessments")
+        .orderBy("assessedAt", "desc")
+        .limit(1)
+        .get();
+    let riskLevel = "green";
+    let handlingTolerance = null;
+    if (!assessSnap.empty) {
+        const a = assessSnap.docs[0].data();
+        riskLevel = a.riskLevel ?? "green";
+        const ht = a.handlingTolerance;
+        if (ht) {
+            handlingTolerance = {
+                bathSensitivity: ht.bathSensitivity ?? "cooperative",
+                dryingSensitivity: ht.dryingSensitivity ?? "low",
+                nailTrimming: ht.nailTrimming ?? "cooperative",
+            };
+        }
+    }
+    // ── 3. Cálculo MPT ────────────────────────────────────────────────────────
+    const result = computeMPT({ sizeCategory, coatType, coatCondition, riskLevel, handlingTolerance });
+    console.log(`[MPT] petId=${petId} service=${serviceType} → ${result.estimatedMinutes} min, ${result.staffUnitsRequired} staff`);
+    return result;
+});
+const LINK_CODE_REGEX = /^PET-[A-Z0-9]{4}$/;
+exports.linkPetToOwner = (0, https_1.onCall)(async (request) => {
+    if (!request.auth) {
+        throw new https_1.HttpsError("unauthenticated", "El usuario debe estar autenticado.");
+    }
+    const callerUid = request.auth.uid;
+    const normalized = (request.data.code ?? "").trim().toUpperCase();
+    // ── 1. Validar formato del código ────────────────────────────────────────
+    if (!LINK_CODE_REGEX.test(normalized)) {
+        throw new https_1.HttpsError("invalid-argument", "Formato de código inválido. Debe ser PET-XXXX (4 caracteres alfanuméricos).");
+    }
+    const prefix = getPrefix(request.auth);
+    // ── 2. Transacción atómica ────────────────────────────────────────────────
+    const result = await db.runTransaction(async (tx) => {
+        // 2a. Leer el documento del código de vinculación
+        const linkRef = db.collection(`${prefix}pending_links`).doc(normalized);
+        const linkSnap = await tx.get(linkRef);
+        if (!linkSnap.exists) {
+            throw new https_1.HttpsError("not-found", "Código no encontrado. Verifica que sea correcto o solicita uno nuevo al staff.");
+        }
+        const linkData = linkSnap.data();
+        // 2b. Verificar que no haya sido canjeado previamente
+        if (linkData.redeemed === true) {
+            throw new https_1.HttpsError("failed-precondition", "Este código ya fue utilizado. Solicita un nuevo código al staff.");
+        }
+        // 2c. Verificar vigencia temporal
+        const expiresAt = linkData.expiresAt.toDate();
+        if (new Date() > expiresAt) {
+            throw new https_1.HttpsError("deadline-exceeded", "El código ha expirado. Los códigos son válidos por 15 minutos. Solicita uno nuevo.");
+        }
+        // 2d. Leer la mascota asociada
+        const petId = linkData.petId;
+        const petRef = db.collection(`${prefix}pets`).doc(petId);
+        const petSnap = await tx.get(petRef);
+        if (!petSnap.exists) {
+            throw new https_1.HttpsError("not-found", "La mascota asociada a este código no existe. Contacta al staff.");
+        }
+        const petData = petSnap.data();
+        const petName = petData.name ?? "";
+        const callerBranchId = request.auth?.token?.branchId;
+        const linkBranchId = linkData.branchId;
+        const petBranchId = petData.branchId;
+        // Aislamiento Multi-tenant por sucursal
+        if (linkBranchId && petBranchId && linkBranchId !== petBranchId) {
+            throw new https_1.HttpsError("failed-precondition", "El código de vinculación no corresponde a la sucursal de la mascota.");
+        }
+        if (callerBranchId && petBranchId && callerBranchId !== petBranchId) {
+            throw new https_1.HttpsError("permission-denied", "No tienes permiso para vincular una mascota de otra sucursal.");
+        }
+        // 2e. Escrituras transaccionales
+        // Reemplaza "PENDING_LINK" (o cualquier ownerId previo) por el UID real del dueño.
+        tx.update(petRef, {
+            ownerId: callerUid,
+            ownerLinkedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        // Marca el código como canjeado — previene doble uso antes del TTL de limpieza.
+        tx.update(linkRef, {
+            redeemed: true,
+            redeemedBy: callerUid,
+            redeemedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log(`[LinkPet] Código ${normalized} canjeado. petId=${petId}, newOwner=${callerUid}`);
+        return { petId, petName, newOwnerId: callerUid };
+    });
+    return result;
+});
+/**
+ * CALLABLE: registerBranchStaff
+ * Permite a un Administrador Local de Sucursal (isAdmin === true) registrar
+ * empleados para su sucursal, heredando el branchId del administrador.
+ */
+exports.registerBranchStaff = (0, https_1.onCall)(async (request) => {
+    // 1. Validar autenticación
+    if (!request.auth) {
+        throw new https_1.HttpsError("unauthenticated", "El usuario debe estar autenticado.");
+    }
+    const claims = request.auth.token;
+    // 2. Validar privilegios de administrador local
+    if (!claims.isAdmin) {
+        throw new https_1.HttpsError("permission-denied", "Solo los administradores de sucursal pueden dar de alta personal.");
+    }
+    const branchId = claims.branchId;
+    if (!branchId) {
+        throw new https_1.HttpsError("failed-precondition", "El administrador no cuenta con una sucursal física asignada.");
+    }
+    const { email, displayName, role, canPerformMedical, canPerformServices, password } = request.data;
+    if (!email || !displayName || !role) {
+        throw new https_1.HttpsError("invalid-argument", "Los campos 'email', 'displayName' y 'role' son obligatorios.");
+    }
+    const prefix = getPrefix(request.auth);
+    try {
+        // 3. Crear el usuario en Firebase Authentication
+        const userRecord = await auth.createUser({
+            email,
+            password: password || "StaffTemp2026!",
+            displayName,
+            emailVerified: true,
+        });
+        const uid = userRecord.uid;
+        // 4. Configurar custom claims heredando el branchId
+        const staffClaims = {
+            role: role,
+            branchId: branchId,
+            isAdmin: false,
+            canPerformMedical: canPerformMedical,
+            canPerformServices: canPerformServices,
+            isApprovedVet: role === "vet",
+        };
+        await auth.setCustomUserClaims(uid, staffClaims);
+        console.log(`[Staff Service] Custom Claims asignados a ${email} (UID: ${uid}):`, staffClaims);
+        // 5. Crear el perfil en Firestore de producción o demo
+        await db.collection(`${prefix}users`).doc(uid).set({
+            uid: uid,
+            email: email,
+            displayName: displayName,
+            role: role,
+            branchId: branchId,
+            isApprovedVet: role === "vet",
+            vetStatus: role === "vet" ? "approved" : null,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            subscriptionTier: role === "vet" ? "trial" : "free",
+        });
+        console.log(`[Staff Service] Registro exitoso. Empleado ${displayName} asignado a sucursal ${branchId}`);
+        return {
+            success: true,
+            uid: uid,
+            displayName: displayName,
+        };
+    }
+    catch (error) {
+        console.error("[Staff Service] Error en registerBranchStaff:", error);
+        if (error.code === "auth/email-already-exists") {
+            throw new https_1.HttpsError("already-exists", "Este correo electrónico ya está registrado.");
+        }
+        throw new https_1.HttpsError("internal", error.message || "Error al procesar el registro del staff.");
+    }
 });
 //# sourceMappingURL=index.js.map

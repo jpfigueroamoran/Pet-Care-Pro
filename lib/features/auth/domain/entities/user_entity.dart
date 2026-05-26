@@ -1,12 +1,21 @@
 enum UserRole {
   owner,
   vet,
+  groomer,      // Lavador / Estilista de mascotas
+  caretaker,    // Cuidador de guardería
+  receptionist, // Recepcionista
   admin;
 
   static UserRole fromString(String? role) {
     switch (role?.toLowerCase()) {
       case 'vet':
         return UserRole.vet;
+      case 'groomer':
+        return UserRole.groomer;
+      case 'caretaker':
+        return UserRole.caretaker;
+      case 'receptionist':
+        return UserRole.receptionist;
       case 'admin':
         return UserRole.admin;
       case 'owner':
@@ -55,6 +64,7 @@ class UserEntity {
   final String email;
   final String displayName;
   final UserRole role;
+  final String? branchId; // <--- Multi-tenant branch ID
   final bool isApprovedVet;
   final String? professionalLicense;
   final List<VetService> services;
@@ -89,6 +99,7 @@ class UserEntity {
     required this.email,
     required this.displayName,
     required this.role,
+    this.branchId,
     this.isApprovedVet = false,
     this.professionalLicense,
     this.services = const [],
@@ -110,13 +121,18 @@ class UserEntity {
 
   bool get isOwner => role == UserRole.owner;
   bool get isVet => role == UserRole.vet;
+  bool get isGroomer => role == UserRole.groomer;
+  bool get isCaretaker => role == UserRole.caretaker;
+  bool get isReceptionist => role == UserRole.receptionist;
   bool get isAdmin => role == UserRole.admin;
+  bool get isStaff => role == UserRole.groomer || role == UserRole.caretaker || role == UserRole.receptionist;
 
   UserEntity copyWith({
     String? uid,
     String? email,
     String? displayName,
     UserRole? role,
+    String? branchId,
     bool? isApprovedVet,
     String? professionalLicense,
     List<VetService>? services,
@@ -140,6 +156,7 @@ class UserEntity {
       email: email ?? this.email,
       displayName: displayName ?? this.displayName,
       role: role ?? this.role,
+      branchId: branchId ?? this.branchId,
       isApprovedVet: isApprovedVet ?? this.isApprovedVet,
       professionalLicense: professionalLicense ?? this.professionalLicense,
       services: services ?? this.services,

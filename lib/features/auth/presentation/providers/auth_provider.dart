@@ -81,6 +81,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
           email: firebaseUser.email ?? '',
           displayName: data['displayName'] as String? ?? firebaseUser.displayName ?? 'Usuario',
           role: role,
+          branchId: data['branchId'] as String?,
           isApprovedVet: data['isApprovedVet'] as bool? ?? false,
           professionalLicense: data['professionalLicense'] as String?,
           services: services,
@@ -179,7 +180,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
   }
 
   /// Registro de nuevos usuarios en Firebase Auth y Firestore
-  Future<void> register(String name, String email, String password, UserRole role, String? license) async {
+  Future<void> register(String name, String email, String password, UserRole role, String? license, {String? branchName}) async {
     state = state.copyWith(isLoading: true, errorMessage: null);
     try {
       final UserCredential userCredential = await FirebaseAuth.instance
@@ -195,14 +196,30 @@ class AuthNotifier extends StateNotifier<AuthState> {
           'email': email,
           'displayName': name,
           'role': role.name,
-          'isApprovedVet': false, // Los veterinarios inician inactivos hasta aprobación del admin
+          'isApprovedVet': role == UserRole.admin ? true : false,
           'professionalLicense': license,
           'createdAt': FieldValue.serverTimestamp(),
         };
         if (role == UserRole.vet) {
           profileData['vetStatus'] = 'pending';
         }
+        
+        if (role == UserRole.admin && branchName != null && branchName.trim().isNotEmpty) {
+          final String normalizedBranchId = branchName
+              .toLowerCase()
+              .trim()
+              .replaceAll(RegExp(r'[^a-z0-9\s]'), '') // remove non-alphanumeric except spaces
+              .replaceAll(RegExp(r'\s+'), '_'); // replace spaces with underscores
+          profileData['branchId'] = normalizedBranchId;
+          profileData['isAdmin'] = true;
+          profileData['canPerformMedical'] = true;
+          profileData['canPerformServices'] = true;
+        }
+
         await FirebaseFirestore.instance.demoCollection('users').doc(firebaseUser.uid).set(profileData);
+
+        // Forzar recarga de Claims para obtener el JWT sincronizado
+        await firebaseUser.getIdTokenResult(true);
 
         await _loadUserProfile(firebaseUser);
       }
@@ -475,6 +492,7 @@ final pendingVetsStreamProvider = StreamProvider<List<UserEntity>>((ref) {
                 email: data['email'] as String? ?? '',
                 displayName: data['displayName'] as String? ?? 'Veterinario',
                 role: UserRole.vet,
+                branchId: data['branchId'] as String?,
                 isApprovedVet: data['isApprovedVet'] as bool? ?? false,
                 professionalLicense: data['professionalLicense'] as String?,
                 services: services,
@@ -486,3 +504,43 @@ final pendingVetsStreamProvider = StreamProvider<List<UserEntity>>((ref) {
             .toList();
       });
 });
+
+// Stream de todos los colaboradores (veterinarios y staff) de una sucursal en particular (Admin de sucursal)
+final branchStaffStreamProvider = StreamProvider.family<List<UserEntity>, String>((ref, branchId) {
+  return FirebaseFirestore.instance
+      .demoCollection('users')
+      .where('branchId', isEqualTo: branchId)
+      .snapshots()
+      .map((snapshot) {
+        final List<UserEntity> list = [];
+        for (final doc in snapshot.docs) {
+          final data = doc.data();
+          final roleStr = data['role'] as String? ?? '';
+          if (roleStr == 'vet' || roleStr == 'staff') {
+            final role = UserRole.values.firstWhere(
+              (e) => e.name == roleStr,
+              orElse: () => UserRole.owner, // staff se mapea a owner en el enum original
+            );
+            final servicesList = data['services'] as List<dynamic>? ?? [];
+            final services = servicesList
+                .map((item) => VetService.fromMap(Map<String, dynamic>.from(item as Map)))
+                .toList();
+            list.add(UserEntity(
+              uid: doc.id,
+              email: data['email'] as String? ?? '',
+              displayName: data['displayName'] as String? ?? 'Colaborador',
+              role: role,
+              branchId: data['branchId'] as String?,
+              isApprovedVet: data['isApprovedVet'] as bool? ?? false,
+              professionalLicense: data['professionalLicense'] as String?,
+              services: services,
+              clabe: data['clabe'] as String?,
+              vetStatus: data['vetStatus'] as String?,
+            ));
+          }
+        }
+        list.sort((a, b) => a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase()));
+        return list;
+      });
+});
+

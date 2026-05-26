@@ -18,6 +18,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _licenseController = TextEditingController();
+  final _branchNameController = TextEditingController();
   UserRole _selectedRole = UserRole.owner;
 
   @override
@@ -26,6 +27,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
     _emailController.dispose();
     _passwordController.dispose();
     _licenseController.dispose();
+    _branchNameController.dispose();
     super.dispose();
   }
 
@@ -37,18 +39,21 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
             _passwordController.text,
             _selectedRole,
             _selectedRole == UserRole.vet ? _licenseController.text : null,
+            branchName: _selectedRole == UserRole.admin ? _branchNameController.text : null,
           );
 
       final currentAuthState = ref.read(authNotifierProvider);
 
       if (context.mounted && currentAuthState.errorMessage == null) {
+        String successMessage = 'Registro exitoso. ¡Bienvenido a Pet-it Care Pro!';
+        if (_selectedRole == UserRole.vet) {
+          successMessage = 'Registro exitoso. Tu cuenta de veterinario está pendiente de aprobación por el Administrador.';
+        } else if (_selectedRole == UserRole.admin) {
+          successMessage = '¡Sucursal registrada con éxito! Bienvenido al panel de administración.';
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              _selectedRole == UserRole.vet
-                  ? 'Registro exitoso. Tu cuenta de veterinario está pendiente de aprobación por el Administrador.'
-                  : 'Registro exitoso. ¡Bienvenido a Pet-it Care Pro!',
-            ),
+            content: Text(successMessage),
             backgroundColor: AppTheme.mintGreen,
           ),
         );
@@ -132,7 +137,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                           children: [
                             Expanded(
                               child: ChoiceChip(
-                                label: const Center(child: Text('DUEÑO')),
+                                label: const Center(child: Text('DUEÑO', style: TextStyle(fontSize: 10))),
                                 selected: _selectedRole == UserRole.owner,
                                 selectedColor: AppTheme.mintGreen,
                                 backgroundColor: AppTheme.surfaceVariant,
@@ -149,10 +154,10 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                                 },
                               ),
                             ),
-                            const SizedBox(width: 12),
+                            const SizedBox(width: 6),
                             Expanded(
                               child: ChoiceChip(
-                                label: const Center(child: Text('VETERINARIO')),
+                                label: const Center(child: Text('VET', style: TextStyle(fontSize: 10))),
                                 selected: _selectedRole == UserRole.vet,
                                 selectedColor: AppTheme.skyBlue,
                                 backgroundColor: AppTheme.surfaceVariant,
@@ -169,9 +174,54 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                                 },
                               ),
                             ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: ChoiceChip(
+                                label: const Center(child: Text('SUCURSAL', style: TextStyle(fontSize: 10))),
+                                selected: _selectedRole == UserRole.admin,
+                                selectedColor: AppTheme.mintGreen,
+                                backgroundColor: AppTheme.surfaceVariant,
+                                labelStyle: TextStyle(
+                                  color: _selectedRole == UserRole.admin ? Colors.white : AppTheme.textMuted,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                                onSelected: (bool selected) {
+                                  if (selected) {
+                                    setState(() {
+                                      _selectedRole = UserRole.admin;
+                                    });
+                                  }
+                                },
+                              ),
+                            ),
                           ],
                         ),
-                        const SizedBox(height: 24),
+                        const SizedBox(height: 12),
+
+                        // Aviso para staff invitado
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: AppTheme.skyBlue.withOpacity(0.08),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: AppTheme.skyBlue.withOpacity(0.3)),
+                          ),
+                          child: const Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.info_outline, color: AppTheme.skyBlue, size: 16),
+                              SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Si fuiste invitado como parte del staff (lavador, cuidador, recepcionista), regístrate con el correo al que recibiste la invitación y selecciona "Dueño" — tu rol se asignará automáticamente.',
+                                  style: TextStyle(color: AppTheme.skyBlue, fontSize: 11, height: 1.4),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                        const SizedBox(height: 16),
 
                         if (authState.errorMessage != null) ...[
                           Container(
@@ -265,6 +315,24 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                             validator: (value) {
                               if (_selectedRole == UserRole.vet && (value == null || value.isEmpty)) {
                                 return 'La cédula profesional es obligatoria';
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 20),
+                        ],
+
+                        if (_selectedRole == UserRole.admin) ...[
+                          TextFormField(
+                            controller: _branchNameController,
+                            decoration: const InputDecoration(
+                              labelText: 'Nombre de la Sucursal / Negocio',
+                              prefixIcon: Icon(Icons.storefront_outlined, color: AppTheme.mintGreen),
+                              hintText: 'Ej. Petit Resort',
+                            ),
+                            validator: (value) {
+                              if (_selectedRole == UserRole.admin && (value == null || value.isEmpty)) {
+                                return 'El nombre de la sucursal es obligatorio';
                               }
                               return null;
                             },

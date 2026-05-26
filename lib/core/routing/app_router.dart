@@ -24,6 +24,13 @@ import '../../features/payments/presentation/screens/vet_monthly_report_screen.d
 import '../../features/subscriptions/presentation/screens/vet_subscription_screen.dart';
 import '../../features/vet_directory/presentation/screens/vet_directory_screen.dart';
 import '../../features/vet_directory/presentation/screens/vet_location_screen.dart';
+import '../../features/boarding/presentation/screens/boarding_registration_flow.dart';
+import '../../features/boarding/presentation/screens/caretaker_dashboard_screen.dart';
+import '../../features/boarding/presentation/screens/groomer_dashboard_screen.dart';
+import '../../features/boarding/presentation/screens/owner_reservations_screen.dart';
+import '../../features/boarding/presentation/screens/receptionist_dashboard_screen.dart';
+import '../../features/boarding/presentation/screens/service_booking_screen.dart';
+import '../../features/setup_wizard/presentation/screens/setup_wizard_screen.dart';
 
 // Proveedor global de GoRouter reactivo al estado de autenticación
 final routerProvider = Provider<GoRouter>((ref) {
@@ -56,15 +63,35 @@ final routerProvider = Provider<GoRouter>((ref) {
         return '/unauthorized';
       }
 
-      // Restricción de todas las rutas exclusivas del Veterinario
+      // Restricción de rutas exclusivas del veterinario
       const vetOnlyRoutes = ['/vet-dashboard', '/scan-qr', '/vet-services', '/vet-payment-review', '/vet-monthly-report', '/vet-payment-settings', '/vet-subscription', '/vet-location'];
       if (vetOnlyRoutes.contains(state.matchedLocation) && userRole != UserRole.vet) {
+        return '/unauthorized';
+      }
+
+      // Restricción de dashboards de staff operativo
+      if (state.matchedLocation == '/groomer-dashboard' && userRole != UserRole.groomer) {
+        return '/unauthorized';
+      }
+      if (state.matchedLocation == '/caretaker-dashboard' && userRole != UserRole.caretaker) {
+        return '/unauthorized';
+      }
+      if (state.matchedLocation == '/receptionist-dashboard' && userRole != UserRole.receptionist) {
         return '/unauthorized';
       }
 
       // Restricción de Dashboard de Administrador
       if (state.matchedLocation == '/admin-dashboard' && userRole != UserRole.admin) {
         return '/unauthorized';
+      }
+
+      // Wizard de primer uso: admin sin branchId va al wizard (excepto si ya está ahí)
+      if (userRole == UserRole.admin &&
+          (authState.user!.branchId == null || authState.user!.branchId!.isEmpty) &&
+          state.matchedLocation != '/setup-wizard' &&
+          state.matchedLocation != '/login' &&
+          state.matchedLocation != '/register') {
+        return '/setup-wizard';
       }
 
       // El resto de rutas dinámicas (como historial) se autovalidan en base a RBAC en pantalla
@@ -171,6 +198,52 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const VetSubscriptionScreen(),
       ),
 
+      // ── Módulo Boarding v1.1.0 ────────────────────────────────────────────
+      GoRoute(
+        path: '/pet/:petId/boarding-registration',
+        builder: (context, state) {
+          final petId = state.pathParameters['petId'] ?? '';
+          final petName = state.uri.queryParameters['petName'] ?? 'Mascota';
+          return BoardingRegistrationFlow(petId: petId, petName: petName);
+        },
+      ),
+      GoRoute(
+        path: '/pet/:petId/service-booking',
+        builder: (context, state) {
+          final petId = state.pathParameters['petId'] ?? '';
+          final q = state.uri.queryParameters;
+          return ServiceBookingScreen(
+            petId: petId,
+            petName: q['petName'] ?? 'Mascota',
+            ownerId: q['ownerId'] ?? '',
+            ownerName: q['ownerName'] ?? '',
+            facilityRunId: q['runId'] ?? 'run-default',
+          );
+        },
+      ),
+      GoRoute(
+        path: '/owner-reservations',
+        builder: (context, state) => const OwnerReservationsScreen(),
+      ),
+      GoRoute(
+        path: '/setup-wizard',
+        builder: (context, state) => const SetupWizardScreen(),
+      ),
+
+      // ── Dashboards de Staff Operativo ────────────────────────────────────
+      GoRoute(
+        path: '/groomer-dashboard',
+        builder: (context, state) => const GroomerDashboardScreen(),
+      ),
+      GoRoute(
+        path: '/caretaker-dashboard',
+        builder: (context, state) => const CaretakerDashboardScreen(),
+      ),
+      GoRoute(
+        path: '/receptionist-dashboard',
+        builder: (context, state) => const ReceptionistDashboardScreen(),
+      ),
+
       // Acceso Denegado
       GoRoute(
         path: '/vet-directory',
@@ -200,6 +273,12 @@ String _getDashboardRoute(UserRole role) {
       return '/owner-dashboard';
     case UserRole.vet:
       return '/vet-dashboard';
+    case UserRole.groomer:
+      return '/groomer-dashboard';
+    case UserRole.caretaker:
+      return '/caretaker-dashboard';
+    case UserRole.receptionist:
+      return '/receptionist-dashboard';
     case UserRole.admin:
       return '/admin-dashboard';
   }

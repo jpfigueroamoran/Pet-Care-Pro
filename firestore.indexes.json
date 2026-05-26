@@ -287,6 +287,106 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "branchId",        "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "branchId",        "order": "ASCENDING" },
+        { "fieldPath": "status",          "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "branchId",        "order": "ASCENDING" },
+        { "fieldPath": "petId",           "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",           "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected",  "order": "ASCENDING" },
+        { "fieldPath": "checkOutExpected", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "branchId",         "order": "ASCENDING" },
+        { "fieldPath": "status",           "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected",  "order": "ASCENDING" },
+        { "fieldPath": "checkOutExpected", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "petId",            "order": "ASCENDING" },
+        { "fieldPath": "status",           "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected",  "order": "ASCENDING" },
+        { "fieldPath": "checkOutExpected", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "demo_boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "branchId",        "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "demo_boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",           "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected",  "order": "ASCENDING" },
+        { "fieldPath": "checkOutExpected", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "demo_boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "branchId",         "order": "ASCENDING" },
+        { "fieldPath": "status",           "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected",  "order": "ASCENDING" },
+        { "fieldPath": "checkOutExpected", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "demo_boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "petId",            "order": "ASCENDING" },
+        { "fieldPath": "status",           "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected",  "order": "ASCENDING" },
+        { "fieldPath": "checkOutExpected", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "demo_boarding_reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "branchId",        "order": "ASCENDING" },
+        { "fieldPath": "petId",           "order": "ASCENDING" },
+        { "fieldPath": "checkInExpected", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

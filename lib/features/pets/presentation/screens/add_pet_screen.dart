@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../auth/domain/entities/user_entity.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
 import '../../../medical_history/data/repositories/medical_repository.dart';
 import '../../domain/entities/pet_entity.dart';
@@ -24,6 +25,7 @@ class _AddPetScreenState extends ConsumerState<AddPetScreen> {
   final _ageController = TextEditingController();
   final _allergiesController = TextEditingController();
   final _conditionsController = TextEditingController();
+  final _ownerEmailController = TextEditingController();
   String _selectedSpecies = 'Perro';
   XFile? _imageFile;
   Uint8List? _imageBytes;
@@ -39,6 +41,7 @@ class _AddPetScreenState extends ConsumerState<AddPetScreen> {
     _ageController.dispose();
     _allergiesController.dispose();
     _conditionsController.dispose();
+    _ownerEmailController.dispose();
     super.dispose();
   }
 
@@ -224,6 +227,48 @@ class _AddPetScreenState extends ConsumerState<AddPetScreen> {
         }
       }
 
+      final isStaff = user.role == UserRole.vet || user.role == UserRole.admin;
+      String targetOwnerId = user.uid;
+
+      if (isStaff) {
+        final emailOrUid = _ownerEmailController.text.trim();
+        if (emailOrUid.isEmpty) {
+          setState(() {
+            _errorMessage = 'Por favor ingresa el email o UID del dueño.';
+            _isLoading = false;
+          });
+          return;
+        }
+
+        final prefix = user.email.startsWith('demo.') ? 'demo_' : '';
+        
+        // Intentar primero por email
+        var ownerSnap = await FirebaseFirestore.instance
+            .collection('${prefix}users')
+            .where('email', isEqualTo: emailOrUid)
+            .limit(1)
+            .get();
+
+        if (ownerSnap.docs.isEmpty) {
+          // Intentar por UID directo
+          final directDoc = await FirebaseFirestore.instance
+              .collection('${prefix}users')
+              .doc(emailOrUid)
+              .get();
+          if (directDoc.exists) {
+            targetOwnerId = directDoc.id;
+          } else {
+            setState(() {
+              _errorMessage = 'No se encontró ningún dueño registrado con el email o UID proporcionado.';
+              _isLoading = false;
+            });
+            return;
+          }
+        } else {
+          targetOwnerId = ownerSnap.docs.first.id;
+        }
+      }
+
       final newPet = PetEntity(
         id: '',
         name: _nameController.text.trim(),
@@ -231,7 +276,8 @@ class _AddPetScreenState extends ConsumerState<AddPetScreen> {
         breed: _breedController.text.trim(),
         age: int.parse(_ageController.text.trim()),
         photoUrl: photoUrl,
-        ownerId: user.uid,
+        ownerId: targetOwnerId,
+        branchId: user.branchId ?? '',
         createdAt: DateTime.now(),
         allergies: _allergiesController.text.trim().isNotEmpty
             ? _allergiesController.text.split(',').map((e) => e.trim()).toList()
@@ -248,8 +294,8 @@ class _AddPetScreenState extends ConsumerState<AddPetScreen> {
         for (final vaccine in _pendingVaccines) {
           await medRepo.addVaccinationRecord(petId, {
             ...vaccine,
-            'verifiedByVet': false,
-            'enteredByOwnerUid': user.uid,
+            'verifiedByVet': isStaff,
+            'enteredByOwnerUid': targetOwnerId,
           });
         }
       }
@@ -273,6 +319,9 @@ class _AddPetScreenState extends ConsumerState<AddPetScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final user = ref.watch(currentUserProvider);
+    final isStaff = user?.role == UserRole.vet || user?.role == UserRole.admin;
+
     return Scaffold(
       backgroundColor: AppTheme.background,
       appBar: AppBar(
@@ -365,6 +414,42 @@ class _AddPetScreenState extends ConsumerState<AddPetScreen> {
                       ),
                     ),
                     const SizedBox(height: 24),
+                  ],
+
+                  if (isStaff) ...[
+                    TextFormField(
+                      controller: _ownerEmailController,
+                      style: const TextStyle(color: AppTheme.textPrimary),
+                      decoration: InputDecoration(
+                        labelText: 'Email o UID del Dueño',
+                        helperText: 'Ingresa el correo del cliente registrado para vincular automáticamente la mascota a su cuenta.',
+                        helperStyle: const TextStyle(color: AppTheme.textMuted, fontSize: 11),
+                        prefixIcon: const Icon(Icons.person_outline, color: AppTheme.mintGreen),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: AppTheme.border),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: AppTheme.mintGreen),
+                        ),
+                        errorBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: AppTheme.coralRed),
+                        ),
+                        focusedErrorBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: AppTheme.coralRed),
+                        ),
+                      ),
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Por favor ingresa el email del dueño';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 20),
                   ],
 
                   TextFormField(

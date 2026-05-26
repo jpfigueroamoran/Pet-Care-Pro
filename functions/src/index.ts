@@ -28,11 +28,30 @@ function getCol(colName: string, auth?: any): admin.firestore.CollectionReferenc
  * Función Auxiliar: Sincroniza el Custom Claim 'role' del usuario en Auth
  * basándose en su documento de perfil en Firestore.
  */
-async function syncUserClaims(uid: string, role: string, isApprovedVet?: boolean): Promise<void> {
-  const claims = {
-    role: role,
-    isApprovedVet: isApprovedVet || false,
+async function syncUserClaims(uid: string, role: string, isApprovedVet?: boolean, branchId?: string): Promise<void> {
+  // v1.1.0: RBAC Fluido — los claims granulares se derivan del rol + estado de aprobación.
+  // canPerformMedical: vets aprobados y admins pueden acceder a registros médicos/conductuales.
+  // canPerformServices: vets aprobados y admins pueden acceder a datos de estética/guardería.
+  // isAdmin: acceso total, incluyendo edición/borrado de evaluaciones conductuales.
+  // branchId: aislamiento multi-tenant; se propaga desde el documento Firestore al JWT.
+  const isVetApproved  = role === "vet" && (isApprovedVet === true);
+  const isAdminRole    = role === "admin";
+  const isServiceStaff = role === "groomer" || role === "caretaker";
+
+  const claims: Record<string, boolean | string> = {
+    role:               role,
+    isApprovedVet:      isApprovedVet || false,
+    canPerformMedical:  isVetApproved || isAdminRole,
+    canPerformServices: isVetApproved || isAdminRole || isServiceStaff,
+    isAdmin:            isAdminRole,
   };
+
+  // branchId solo se inyecta cuando está presente; los usuarios sin sucursal
+  // (owners, vets independientes) no llevan este claim en su JWT.
+  if (branchId) {
+    claims.branchId = branchId;
+  }
+
   await auth.setCustomUserClaims(uid, claims);
   console.log(`[RBAC] Custom Claims actualizados para ${uid}:`, claims);
 }
@@ -47,12 +66,40 @@ export const onUserProfileCreatedV2 = onDocumentCreated("users/{userId}", async 
   if (!snapshot) return;
   const uid = event.params.userId;
   const data = snapshot.data();
-  const role = data?.role || "owner";
+  let role = data?.role || "owner";
   const isApprovedVet = data?.isApprovedVet || false;
+  let branchId = data?.branchId as string | undefined;
 
-  console.log(`[Firestore Trigger] Perfil creado para ${uid}. Sincronizando rol: ${role}`);
+  // Auto-link: si existe una invitación pendiente para este email, aplicarla
+  const email = data?.email as string | undefined;
+  if (email && role === "owner") {
+    try {
+      const inviteSnap = await db.collection("staff_invitations")
+        .where("email", "==", email)
+        .where("status", "==", "pending")
+        .limit(1)
+        .get();
+      if (!inviteSnap.empty) {
+        const invite = inviteSnap.docs[0];
+        const inviteData = invite.data();
+        role = inviteData.role;
+        branchId = inviteData.branchId;
+        await db.collection("users").doc(uid).update({ role, branchId });
+        await invite.ref.update({
+          status: "accepted",
+          acceptedAt: admin.firestore.FieldValue.serverTimestamp(),
+          acceptedByUid: uid,
+        });
+        console.log(`[Invite] Auto-linked ${email} as ${role} in branch ${branchId}`);
+      }
+    } catch (err) {
+      console.error(`[Invite] Error linking invitation for ${email}:`, err);
+    }
+  }
+
+  console.log(`[Firestore Trigger] Perfil creado para ${uid}. Sincronizando rol: ${role}${branchId ? `, sucursal: ${branchId}` : ""}`);
   try {
-    await syncUserClaims(uid, role, isApprovedVet);
+    await syncUserClaims(uid, role, isApprovedVet, branchId);
   } catch (error) {
     console.error(`[Firestore Trigger] Error sincronizando claims al crear perfil de ${uid}:`, error);
   }
@@ -63,12 +110,40 @@ export const onUserProfileCreatedDemo = onDocumentCreated("demo_users/{userId}",
   if (!snapshot) return;
   const uid = event.params.userId;
   const data = snapshot.data();
-  const role = data?.role || "owner";
+  let role = data?.role || "owner";
   const isApprovedVet = data?.isApprovedVet || false;
+  let branchId = data?.branchId as string | undefined;
 
-  console.log(`[Firestore Trigger Demo] Perfil creado para ${uid}. Sincronizando rol: ${role}`);
+  // Auto-link demo: si existe una invitación pendiente para este email, aplicarla
+  const email = data?.email as string | undefined;
+  if (email && role === "owner") {
+    try {
+      const inviteSnap = await db.collection("demo_staff_invitations")
+        .where("email", "==", email)
+        .where("status", "==", "pending")
+        .limit(1)
+        .get();
+      if (!inviteSnap.empty) {
+        const invite = inviteSnap.docs[0];
+        const inviteData = invite.data();
+        role = inviteData.role;
+        branchId = inviteData.branchId;
+        await db.collection("demo_users").doc(uid).update({ role, branchId });
+        await invite.ref.update({
+          status: "accepted",
+          acceptedAt: admin.firestore.FieldValue.serverTimestamp(),
+          acceptedByUid: uid,
+        });
+        console.log(`[Invite Demo] Auto-linked ${email} as ${role} in branch ${branchId}`);
+      }
+    } catch (err) {
+      console.error(`[Invite Demo] Error linking invitation for ${email}:`, err);
+    }
+  }
+
+  console.log(`[Firestore Trigger Demo] Perfil creado para ${uid}. Sincronizando rol: ${role}${branchId ? `, sucursal: ${branchId}` : ""}`);
   try {
-    await syncUserClaims(uid, role, isApprovedVet);
+    await syncUserClaims(uid, role, isApprovedVet, branchId);
   } catch (error) {
     console.error(`[Firestore Trigger Demo] Error sincronizando claims al crear perfil de ${uid}:`, error);
   }
@@ -88,14 +163,16 @@ export const onUserProfileUpdatedV2 = onDocumentUpdated("users/{userId}", async 
 
   const roleChanged = beforeData?.role !== afterData?.role;
   const approvalChanged = beforeData?.isApprovedVet !== afterData?.isApprovedVet;
+  const branchChanged = beforeData?.branchId !== afterData?.branchId;
 
-  if (roleChanged || approvalChanged) {
+  if (roleChanged || approvalChanged || branchChanged) {
     const newRole = afterData?.role || "owner";
     const isApprovedVet = afterData?.isApprovedVet || false;
+    const branchId = afterData?.branchId as string | undefined;
 
-    console.log(`[Firestore Trigger] Cambio de rol o aprobación detectado para ${uid}. Actualizando Claims.`);
+    console.log(`[Firestore Trigger] Cambio de rol/aprobación/sucursal detectado para ${uid}. Actualizando Claims.`);
     try {
-      await syncUserClaims(uid, newRole, isApprovedVet);
+      await syncUserClaims(uid, newRole, isApprovedVet, branchId);
     } catch (error) {
       console.error(`[Firestore Trigger] Error al actualizar claims tras modificación de ${uid}:`, error);
     }
@@ -125,14 +202,16 @@ export const onUserProfileUpdatedDemo = onDocumentUpdated("demo_users/{userId}",
 
   const roleChanged = beforeData?.role !== afterData?.role;
   const approvalChanged = beforeData?.isApprovedVet !== afterData?.isApprovedVet;
+  const branchChanged = beforeData?.branchId !== afterData?.branchId;
 
-  if (roleChanged || approvalChanged) {
+  if (roleChanged || approvalChanged || branchChanged) {
     const newRole = afterData?.role || "owner";
     const isApprovedVet = afterData?.isApprovedVet || false;
+    const branchId = afterData?.branchId as string | undefined;
 
-    console.log(`[Firestore Trigger Demo] Cambio de rol o aprobación detectado para ${uid}. Actualizando Claims.`);
+    console.log(`[Firestore Trigger Demo] Cambio de rol/aprobación/sucursal detectado para ${uid}. Actualizando Claims.`);
     try {
-      await syncUserClaims(uid, newRole, isApprovedVet);
+      await syncUserClaims(uid, newRole, isApprovedVet, branchId);
     } catch (error) {
       console.error(`[Firestore Trigger Demo] Error al actualizar claims tras modificación de ${uid}:`, error);
     }
@@ -561,9 +640,13 @@ async function cleanupAndReseedDemo(uid: string): Promise<void> {
   const ts = (offsetMs: number) => admin.firestore.Timestamp.fromMillis(nowMs + offsetMs);
 
   // ── 1. Collect all refs to delete ────────────────────────────────────────
-  const [notifSnap, qrSnap, ...subcollectionRefGroups] = await Promise.all([
+  // Clear rate-limit attempt log so demo users never get throttled between sessions
+  db.collection("demo_link_attempts").doc(uid).delete().catch(() => undefined);
+
+  const [notifSnap, qrSnap, reservationSnap, ...subcollectionRefGroups] = await Promise.all([
     db.collection("demo_users").doc(uid).collection("notifications").get(),
     db.collection("demo_qr_tokens").where("petId", "in", [...DEMO_PET_IDS]).get(),
+    db.collection("demo_boarding_reservations").where("petId", "in", [...DEMO_PET_IDS]).get(),
     ...DEMO_PET_IDS.flatMap((petId) => {
       const petRef = db.collection("demo_pets").doc(petId);
       return [
@@ -576,6 +659,7 @@ async function cleanupAndReseedDemo(uid: string): Promise<void> {
   const toDelete: admin.firestore.DocumentReference[] = [
     ...notifSnap.docs.map((d) => d.ref),
     ...qrSnap.docs.map((d) => d.ref),
+    ...reservationSnap.docs.map((d) => d.ref),
     ...(subcollectionRefGroups as admin.firestore.DocumentReference[][]).flat(),
   ];
 
@@ -648,12 +732,17 @@ async function cleanupAndReseedDemo(uid: string): Promise<void> {
   const vacBatch = db.batch();
   const vacSeeds: Array<{ petId: string; [key: string]: unknown }> = [
     // Rocky — Antirrábica (up to date)
-    { petId: "pet_carlos_001", name: "Antirrábica", type: "vaccine",
+    { petId: "pet_carlos_001", vaccineType: "rabies", name: "Antirrábica", type: "vaccine",
       appliedAt: ts(-180 * day), nextApplicationAt: ts(185 * day),
       appliedByVetId: "demo_vet_placeholder", appliedByVetName: "Dr. Alejandro Méndez (Demo)",
       verifiedByVet: true, lot: "LOT-2025-001", notes: "Sin reacciones adversas." },
+    // Rocky — Bordetella (obligatoria para guardería canina)
+    { petId: "pet_carlos_001", vaccineType: "bordetella", name: "Bordetella (Tos de las Perreras)", type: "vaccine",
+      appliedAt: ts(-200 * day), nextApplicationAt: ts(165 * day),
+      appliedByVetId: "demo_vet_placeholder", appliedByVetName: "Dr. Alejandro Méndez (Demo)",
+      verifiedByVet: true, lot: "LOT-2025-003", notes: "Aplicación intranasal." },
     // Rocky — Múltiple Canina (due in ~15 days — triggers 7-day reminder)
-    { petId: "pet_carlos_001", name: "Múltiple Canina (DHPP)", type: "vaccine",
+    { petId: "pet_carlos_001", vaccineType: "distemper", name: "Múltiple Canina (DHPP)", type: "vaccine",
       appliedAt: ts(-350 * day), nextApplicationAt: ts(15 * day),
       appliedByVetId: "demo_vet_placeholder", appliedByVetName: "Dr. Alejandro Méndez (Demo)",
       verifiedByVet: true, lot: "LOT-2024-088", notes: "Refuerzo anual." },
@@ -662,21 +751,31 @@ async function cleanupAndReseedDemo(uid: string): Promise<void> {
       appliedAt: ts(-60 * day), nextApplicationAt: ts(120 * day),
       appliedByVetId: "demo_vet_placeholder", appliedByVetName: "Dr. Alejandro Méndez (Demo)",
       verifiedByVet: true, notes: "Tratamiento con Milbemax." },
-    // Luna — Triple Felina
-    { petId: "pet_carlos_002", name: "Triple Felina (HCP)", type: "vaccine",
+    // Luna — Triple Felina (obligatoria para guardería felina)
+    { petId: "pet_carlos_002", vaccineType: "tripleFelineFHCP", name: "Triple Felina (HCP)", type: "vaccine",
       appliedAt: ts(-240 * day), nextApplicationAt: ts(125 * day),
       appliedByVetId: "demo_vet_placeholder", appliedByVetName: "Dr. Alejandro Méndez (Demo)",
       verifiedByVet: true, lot: "LOT-2025-042", notes: "Refuerzo anual aplicado." },
+    // Luna — Antirrábica (obligatoria por ley para todas las especies)
+    { petId: "pet_carlos_002", vaccineType: "rabies", name: "Antirrábica", type: "vaccine",
+      appliedAt: ts(-200 * day), nextApplicationAt: ts(165 * day),
+      appliedByVetId: "demo_vet_placeholder", appliedByVetName: "Dr. Alejandro Méndez (Demo)",
+      verifiedByVet: true, lot: "LOT-2025-041", notes: "Sin reacciones adversas." },
     // Luna — Leucemia Felina (due in ~45 days)
-    { petId: "pet_carlos_002", name: "Leucemia Felina (FeLV)", type: "vaccine",
+    { petId: "pet_carlos_002", vaccineType: "felineLeukemia", name: "Leucemia Felina (FeLV)", type: "vaccine",
       appliedAt: ts(-320 * day), nextApplicationAt: ts(45 * day),
       appliedByVetId: "demo_vet_placeholder", appliedByVetName: "Dr. Alejandro Méndez (Demo)",
       verifiedByVet: true, lot: "LOT-2024-199", notes: "Gato con contacto exterior, vacuna prioritaria." },
     // Toby — Antirrábica
-    { petId: "pet_sofia_001", name: "Antirrábica", type: "vaccine",
+    { petId: "pet_sofia_001", vaccineType: "rabies", name: "Antirrábica", type: "vaccine",
       appliedAt: ts(-90 * day), nextApplicationAt: ts(275 * day),
       appliedByVetId: "demo_vet_placeholder", appliedByVetName: "Dr. Alejandro Méndez (Demo)",
       verifiedByVet: true, lot: "LOT-2025-077", notes: "Vacuna aplicada sin incidentes." },
+    // Toby — Bordetella (obligatoria para guardería canina)
+    { petId: "pet_sofia_001", vaccineType: "bordetella", name: "Bordetella (Tos de las Perreras)", type: "vaccine",
+      appliedAt: ts(-85 * day), nextApplicationAt: ts(280 * day),
+      appliedByVetId: "demo_vet_placeholder", appliedByVetName: "Dr. Alejandro Méndez (Demo)",
+      verifiedByVet: true, lot: "LOT-2025-078", notes: "Aplicación intranasal, sin incidentes." },
   ];
   for (const { petId, ...entry } of vacSeeds) {
     vacBatch.set(db.collection("demo_pets").doc(petId as string).collection("vaccination_card").doc(), entry);
@@ -722,6 +821,96 @@ async function cleanupAndReseedDemo(uid: string): Promise<void> {
     medBatch.set(db.collection("demo_pets").doc(petId as string).collection("medical_history").doc(), record);
   }
   await medBatch.commit();
+
+  // ── 6. Seed boarding reservations ────────────────────────────────────────
+  const now = admin.firestore.Timestamp.now();
+
+  const reservationBatch = db.batch();
+  const seedReservations = [
+    // Rocky — completada hace 2 semanas
+    {
+      id: "demo_res_001",
+      petId: "pet_carlos_001", petName: "Rocky",
+      ownerId: "demo_owner_placeholder", ownerName: "Carlos Mendoza (Demo)",
+      branchId: "branch_demo_001",
+      facilityRunId: "run-a1",
+      checkInExpected: ts(-14 * day),
+      checkOutExpected: ts(-11 * day),
+      status: "completed",
+      servicesIncluded: ["boarding", "bath"],
+      safetySnapshot: {
+        calculatedIcdScore: 82,
+        riskLevelAtBooking: "green",
+        compatibilityWarnings: [],
+        assessmentDate: ts(-15 * day),
+      },
+      legalAuthorizations: {
+        emergencyMedicationAllowed: { accepted: true, acceptedAt: ts(-15 * day), documentVersion: "1.0" },
+        contactVetAllowed: { accepted: true, acceptedAt: ts(-15 * day), documentVersion: "1.0" },
+        waterPlayAllowed: { accepted: false, acceptedAt: null, documentVersion: "1.0" },
+        mediaUsageAllowed: { accepted: true, acceptedAt: ts(-15 * day), documentVersion: "1.0" },
+      },
+      staffNotes: "Mascota sociable. Sin incidentes.",
+      createdAt: ts(-15 * day),
+    },
+    // Rocky — confirmada próxima semana
+    {
+      id: "demo_res_002",
+      petId: "pet_carlos_001", petName: "Rocky",
+      ownerId: "demo_owner_placeholder", ownerName: "Carlos Mendoza (Demo)",
+      branchId: "branch_demo_001",
+      facilityRunId: "run-a2",
+      checkInExpected: ts(5 * day),
+      checkOutExpected: ts(9 * day),
+      status: "confirmed",
+      servicesIncluded: ["boarding"],
+      safetySnapshot: {
+        calculatedIcdScore: 79,
+        riskLevelAtBooking: "green",
+        compatibilityWarnings: [],
+        assessmentDate: now,
+      },
+      legalAuthorizations: {
+        emergencyMedicationAllowed: { accepted: true, acceptedAt: now, documentVersion: "1.0" },
+        contactVetAllowed: { accepted: true, acceptedAt: now, documentVersion: "1.0" },
+        waterPlayAllowed: { accepted: true, acceptedAt: now, documentVersion: "1.0" },
+        mediaUsageAllowed: { accepted: false, acceptedAt: null, documentVersion: "1.0" },
+      },
+      staffNotes: "",
+      createdAt: now,
+    },
+    // Luna — pendiente de confirmación
+    {
+      id: "demo_res_003",
+      petId: "pet_carlos_002", petName: "Luna",
+      ownerId: "demo_owner_placeholder", ownerName: "Carlos Mendoza (Demo)",
+      branchId: "branch_demo_001",
+      facilityRunId: "run-gatos-1",
+      checkInExpected: ts(12 * day),
+      checkOutExpected: ts(15 * day),
+      status: "pending",
+      servicesIncluded: ["daycare"],
+      safetySnapshot: {
+        calculatedIcdScore: 91,
+        riskLevelAtBooking: "green",
+        compatibilityWarnings: [],
+        assessmentDate: now,
+      },
+      legalAuthorizations: {
+        emergencyMedicationAllowed: { accepted: true, acceptedAt: now, documentVersion: "1.0" },
+        contactVetAllowed: { accepted: true, acceptedAt: now, documentVersion: "1.0" },
+        waterPlayAllowed: { accepted: false, acceptedAt: null, documentVersion: "1.0" },
+        mediaUsageAllowed: { accepted: true, acceptedAt: now, documentVersion: "1.0" },
+      },
+      staffNotes: "",
+      createdAt: now,
+    },
+  ];
+
+  for (const { id, ...data } of seedReservations) {
+    reservationBatch.set(db.collection("demo_boarding_reservations").doc(id), data);
+  }
+  await reservationBatch.commit();
 
   console.log(`[Demo] Entorno reiniciado: ${toDelete.length} docs eliminados, datos frescos resembrados.`);
 }
@@ -1397,4 +1586,698 @@ export const checkSubscriptionExpiry = onSchedule(
     console.log(`[Subscription] ${allExpired.length} prueba(s) expirada(s) → downgraded a free.`);
   }
 );
+
+
+// =============================================================================
+// v1.1.0 — BOARDING / GROOMING ENGINE
+// =============================================================================
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS MPT (Motor de Productividad de Tiempos) — espejo del Dart use case
+// ─────────────────────────────────────────────────────────────────────────────
+
+function mptBaseMinutes(size: string): number {
+  switch (size.toUpperCase()) {
+    case "TOY":    return 45;
+    case "SMALL":  return 60;
+    case "LARGE":  return 90;
+    case "GIANT":  return 120;
+    default:       return 75; // MEDIUM
+  }
+}
+
+function mptCoatMultiplier(coatType: string): number {
+  switch (coatType.toUpperCase()) {
+    case "LONG":        return 1.5;
+    case "DOUBLE_COAT": return 1.7;
+    case "CURLY":       return 1.6;
+    case "MEDIUM":      return 1.2;
+    default:            return 1.0; // SHORT
+  }
+}
+
+function mptCoatConditionPenalty(coatCondition: string): number {
+  return coatCondition.toUpperCase() === "MATTED" ? 30 : 0;
+}
+
+function mptBathPenalty(sensitivity: string): number {
+  switch (sensitivity) {
+    case "anxious":   return 10;
+    case "defensive": return 25;
+    default:          return 0; // cooperative
+  }
+}
+
+function mptDryingPenalty(sensitivity: string): number {
+  switch (sensitivity) {
+    case "medium":     return 15;
+    case "highPanic":
+    case "high_panic": return 45;
+    default:           return 0; // low
+  }
+}
+
+interface NailInfo { penalty: number; canPerform: boolean; }
+function mptNailInfo(nailTrimming: string): NailInfo {
+  switch (nailTrimming) {
+    case "needsMuzzle":
+    case "needs_muzzle":      return { penalty: 10, canPerform: true };
+    case "sedationRequired":
+    case "sedation_required": return { penalty: 0,  canPerform: false };
+    default:                  return { penalty: 0,  canPerform: true }; // cooperative
+  }
+}
+
+interface MptInput {
+  sizeCategory:    string;
+  coatType:        string;
+  coatCondition:   string;
+  riskLevel:       string;
+  handlingTolerance: {
+    bathSensitivity:   string;
+    dryingSensitivity: string;
+    nailTrimming:      string;
+  } | null;
+}
+
+interface MptOutput {
+  estimatedMinutes:     number;
+  staffUnitsRequired:   number;
+  requiresVetSupervision: boolean;
+  canPerformNailTrimming: boolean;
+  penaltyReasons:       string[];
+}
+
+function computeMPT(input: MptInput): MptOutput {
+  const base        = mptBaseMinutes(input.sizeCategory);
+  const afterCoat   = Math.round(base * mptCoatMultiplier(input.coatType));
+  const afterMat    = afterCoat + mptCoatConditionPenalty(input.coatCondition);
+
+  const ht = input.handlingTolerance;
+  const bathPen  = ht ? mptBathPenalty(ht.bathSensitivity)   : 0;
+  const dryPen   = ht ? mptDryingPenalty(ht.dryingSensitivity) : 0;
+  const nailInfo = ht ? mptNailInfo(ht.nailTrimming) : { penalty: 0, canPerform: true };
+  const total    = afterMat + bathPen + dryPen + nailInfo.penalty;
+
+  const isGiant          = input.sizeCategory.toUpperCase() === "GIANT";
+  const isHighRisk       = ["orange", "red"].includes(input.riskLevel.toLowerCase());
+  const requiresVetSupervision = input.riskLevel.toLowerCase() === "red";
+  let staffUnits         = isGiant ? 2 : 1;
+  if (isHighRisk) staffUnits++;
+
+  const penaltyReasons: string[] = [];
+  if (input.coatType.toUpperCase() !== "SHORT") {
+    penaltyReasons.push(`Pelaje ${input.coatType}: ×${mptCoatMultiplier(input.coatType)} sobre base`);
+  }
+  if (input.coatCondition.toUpperCase() === "MATTED") {
+    penaltyReasons.push("Pelaje enmarañado: +30 min de desanudado");
+  }
+  if (bathPen > 0)  penaltyReasons.push(`Sensibilidad al baño (${ht!.bathSensitivity}): +${bathPen} min`);
+  if (dryPen  > 0)  penaltyReasons.push(`Sensibilidad al secado (${ht!.dryingSensitivity}): +${dryPen} min`);
+  if (!nailInfo.canPerform) penaltyReasons.push("Uñas: requiere coordinación clínica");
+  if (requiresVetSupervision) penaltyReasons.push("Nivel de riesgo ROJO: supervisión veterinaria simultánea");
+
+  return {
+    estimatedMinutes:     total,
+    staffUnitsRequired:   staffUnits,
+    requiresVetSupervision,
+    canPerformNailTrimming: nailInfo.canPerform,
+    penaltyReasons,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: calculateServiceDuration
+//
+// Recibe petId + serviceType y retorna el bloque de tiempo exacto del servicio
+// de estética junto con los recursos de staff necesarios.
+// Requiere claim canPerformServices o canPerformMedical (solo staff).
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface CalculateServiceDurationPayload {
+  petId:       string;
+  serviceType: "bath" | "haircut";
+}
+
+export const calculateServiceDuration = onCall<CalculateServiceDurationPayload>(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "El usuario debe estar autenticado.");
+  }
+
+  const claims = request.auth.token;
+  if (!claims.canPerformServices && !claims.canPerformMedical && !claims.isAdmin) {
+    throw new HttpsError("permission-denied", "Solo el staff puede calcular duraciones de servicio.");
+  }
+
+  const { petId, serviceType } = request.data;
+
+  if (!petId) {
+    throw new HttpsError("invalid-argument", "El campo 'petId' es obligatorio.");
+  }
+  if (!["bath", "haircut"].includes(serviceType)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "El campo 'serviceType' debe ser 'bath' o 'haircut'."
+    );
+  }
+
+  // ── 1. Datos físicos de la mascota ──────────────────────────────────────
+  const petDoc = await getCol("pets", request.auth).doc(petId).get();
+  if (!petDoc.exists) {
+    throw new HttpsError("not-found", `Mascota '${petId}' no encontrada.`);
+  }
+  const pet = petDoc.data()!;
+
+  // Aislamiento Multi-tenant por sucursal
+  const staffBranchId = claims.branchId as string | undefined;
+  const petBranchId = pet.branchId as string | undefined;
+  if (staffBranchId && petBranchId && staffBranchId !== petBranchId) {
+    throw new HttpsError(
+      "permission-denied",
+      "No tienes acceso a los datos de esta mascota (pertenece a otra sucursal)."
+    );
+  }
+
+  const weightKg: number       = (pet.weightKg as number | undefined) ?? 0;
+  const coatType: string       = (pet.coatType as string | undefined) ?? "SHORT";
+  const coatCondition: string  = (pet.coatCondition as string | undefined) ?? "NORMAL";
+  const rawSize: string | undefined = pet.sizeCategory as string | undefined;
+
+  // Derivar sizeCategory desde peso si no está explícita en el documento
+  const sizeCategory: string = rawSize ?? (() => {
+    if (weightKg < 4)  return "TOY";
+    if (weightKg < 10) return "SMALL";
+    if (weightKg < 25) return "MEDIUM";
+    if (weightKg < 45) return "LARGE";
+    return "GIANT";
+  })();
+
+  // ── 2. Evaluación conductual más reciente ────────────────────────────────
+  // La subcolección es confidencial; Admin SDK la lee sin restricciones de reglas.
+  const assessSnap = await getCol("pets", request.auth)
+    .doc(petId)
+    .collection("behavioral_assessments")
+    .orderBy("assessedAt", "desc")
+    .limit(1)
+    .get();
+
+  let riskLevel         = "green";
+  let handlingTolerance: MptInput["handlingTolerance"] | null = null;
+
+  if (!assessSnap.empty) {
+    const a = assessSnap.docs[0].data();
+    riskLevel = (a.riskLevel as string | undefined) ?? "green";
+    const ht  = a.handlingTolerance as Record<string, string> | undefined;
+    if (ht) {
+      handlingTolerance = {
+        bathSensitivity:   ht.bathSensitivity   ?? "cooperative",
+        dryingSensitivity: ht.dryingSensitivity ?? "low",
+        nailTrimming:      ht.nailTrimming      ?? "cooperative",
+      };
+    }
+  }
+
+  // ── 3. Cálculo MPT ────────────────────────────────────────────────────────
+  const result = computeMPT({ sizeCategory, coatType, coatCondition, riskLevel, handlingTolerance });
+
+  console.log(`[MPT] petId=${petId} service=${serviceType} → ${result.estimatedMinutes} min, ${result.staffUnitsRequired} staff`);
+
+  return result;
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: linkPetToOwner
+//
+// El dueño ingresa el código PET-XXXX generado por el staff.
+// Ejecuta una transacción de Firestore para:
+//   1. Validar existencia y vigencia del código en /pending_links/{code}
+//   2. Reemplazar el campo `ownerId` en /pets/{petId} con el UID del llamante
+//   3. Marcar el código como canjeado (redeemedBy, redeemedAt) — previene doble uso
+//
+// La eliminación del documento es diferida; el campo `redeemed: true` actúa como
+// cerrojo durante la ventana de expiración para auditoría.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface LinkPetToOwnerPayload {
+  code: string; // Formato esperado: PET-XXXX (4 chars alfanuméricos en mayúsculas)
+}
+
+interface LinkPetToOwnerResult {
+  petId:      string;
+  petName:    string;
+  newOwnerId: string;
+}
+
+const LINK_CODE_REGEX = /^PET-[A-Z0-9]{4}$/;
+
+export const linkPetToOwner = onCall<LinkPetToOwnerPayload>(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "El usuario debe estar autenticado.");
+  }
+
+  const callerUid = request.auth.uid;
+  const normalized = (request.data.code ?? "").trim().toUpperCase();
+
+  // ── 1. Validar formato del código ────────────────────────────────────────
+  if (!LINK_CODE_REGEX.test(normalized)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Formato de código inválido. Debe ser PET-XXXX (4 caracteres alfanuméricos)."
+    );
+  }
+
+  const prefix = getPrefix(request.auth);
+
+  // ── 2. Rate limiting — máx. 5 intentos por UID en la última hora ─────────
+  const attemptRef = db.collection(`${prefix}link_attempts`).doc(callerUid);
+  const attemptSnap = await attemptRef.get();
+  const now = Date.now();
+  const oneHourAgo = now - 60 * 60 * 1000;
+
+  interface LinkAttempt { timestamps: number[] }
+  const attempts: number[] = (attemptSnap.data() as LinkAttempt | undefined)?.timestamps ?? [];
+  const recentAttempts = attempts.filter((t) => t > oneHourAgo);
+
+  if (recentAttempts.length >= 5) {
+    throw new HttpsError(
+      "resource-exhausted",
+      "Has superado el límite de 5 intentos por hora. Espera un momento e inténtalo de nuevo."
+    );
+  }
+
+  // Persist this attempt (fire-and-forget; failure is non-fatal)
+  attemptRef.set({ timestamps: [...recentAttempts, now] }).catch(() => undefined);
+
+  // ── 3. Transacción atómica ────────────────────────────────────────────────
+  const result = await db.runTransaction<LinkPetToOwnerResult>(async (tx) => {
+    // 2a. Leer el documento del código de vinculación
+    const linkRef  = db.collection(`${prefix}pending_links`).doc(normalized);
+    const linkSnap = await tx.get(linkRef);
+
+    if (!linkSnap.exists) {
+      throw new HttpsError(
+        "not-found",
+        "Código no encontrado. Verifica que sea correcto o solicita uno nuevo al staff."
+      );
+    }
+
+    const linkData = linkSnap.data()!;
+
+    // 2b. Verificar que no haya sido canjeado previamente
+    if (linkData.redeemed === true) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Este código ya fue utilizado. Solicita un nuevo código al staff."
+      );
+    }
+
+    // 2c. Verificar vigencia temporal
+    const expiresAt = (linkData.expiresAt as admin.firestore.Timestamp).toDate();
+    if (new Date() > expiresAt) {
+      throw new HttpsError(
+        "deadline-exceeded",
+        "El código ha expirado. Los códigos son válidos por 15 minutos. Solicita uno nuevo."
+      );
+    }
+
+    // 2d. Leer la mascota asociada
+    const petId  = linkData.petId as string;
+    const petRef = db.collection(`${prefix}pets`).doc(petId);
+    const petSnap = await tx.get(petRef);
+
+    if (!petSnap.exists) {
+      throw new HttpsError(
+        "not-found",
+        "La mascota asociada a este código no existe. Contacta al staff."
+      );
+    }
+
+    const petData = petSnap.data()!;
+    const petName = (petData.name as string | undefined) ?? "";
+
+    const callerBranchId = request.auth?.token?.branchId as string | undefined;
+    const linkBranchId = linkData.branchId as string | undefined;
+    const petBranchId = petData.branchId as string | undefined;
+
+    // Aislamiento Multi-tenant por sucursal
+    if (linkBranchId && petBranchId && linkBranchId !== petBranchId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "El código de vinculación no corresponde a la sucursal de la mascota."
+      );
+    }
+
+    if (callerBranchId && petBranchId && callerBranchId !== petBranchId) {
+      throw new HttpsError(
+        "permission-denied",
+        "No tienes permiso para vincular una mascota de otra sucursal."
+      );
+    }
+
+    // 2e. Escrituras transaccionales
+    // Reemplaza "PENDING_LINK" (o cualquier ownerId previo) por el UID real del dueño.
+    tx.update(petRef, {
+      ownerId:        callerUid,
+      ownerLinkedAt:  admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Marca el código como canjeado — previene doble uso antes del TTL de limpieza.
+    tx.update(linkRef, {
+      redeemed:    true,
+      redeemedBy:  callerUid,
+      redeemedAt:  admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    console.log(`[LinkPet] Código ${normalized} canjeado. petId=${petId}, newOwner=${callerUid}`);
+
+    return { petId, petName, newOwnerId: callerUid };
+  });
+
+  return result;
+});
+
+
+interface RegisterBranchStaffPayload {
+  email: string;
+  displayName: string;
+  role: "vet" | "groomer" | "caretaker" | "receptionist";
+  canPerformMedical: boolean;
+  canPerformServices: boolean;
+  password?: string;
+}
+
+/**
+ * CALLABLE: registerBranchStaff
+ * Permite a un Administrador Local de Sucursal (isAdmin === true) registrar
+ * empleados para su sucursal, heredando el branchId del administrador.
+ */
+export const registerBranchStaff = onCall<RegisterBranchStaffPayload>(async (request) => {
+  // 1. Validar autenticación
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "El usuario debe estar autenticado.");
+  }
+
+  const claims = request.auth.token;
+  
+  // 2. Validar privilegios de administrador local
+  if (!claims.isAdmin) {
+    throw new HttpsError(
+      "permission-denied",
+      "Solo los administradores de sucursal pueden dar de alta personal."
+    );
+  }
+
+  const branchId = claims.branchId as string | undefined;
+  if (!branchId) {
+    throw new HttpsError(
+      "failed-precondition",
+      "El administrador no cuenta con una sucursal física asignada."
+    );
+  }
+
+  const { email, displayName, role, canPerformMedical, canPerformServices, password } = request.data;
+
+  if (!email || !displayName || !role) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Los campos 'email', 'displayName' y 'role' son obligatorios."
+    );
+  }
+
+  const prefix = getPrefix(request.auth);
+
+  try {
+    // 3. Crear el usuario en Firebase Authentication
+    const userRecord = await auth.createUser({
+      email,
+      password: password || "StaffTemp2026!",
+      displayName,
+      emailVerified: true,
+    });
+
+    const uid = userRecord.uid;
+
+    // 4. Configurar custom claims heredando el branchId
+    const staffClaims = {
+      role: role,
+      branchId: branchId,
+      isAdmin: false,
+      canPerformMedical: canPerformMedical,
+      canPerformServices: canPerformServices,
+      isApprovedVet: role === "vet",
+    };
+
+    await auth.setCustomUserClaims(uid, staffClaims);
+    console.log(`[Staff Service] Custom Claims asignados a ${email} (UID: ${uid}):`, staffClaims);
+
+    // 5. Crear el perfil en Firestore de producción o demo
+    await db.collection(`${prefix}users`).doc(uid).set({
+      uid: uid,
+      email: email,
+      displayName: displayName,
+      role: role,
+      branchId: branchId,
+      isApprovedVet: role === "vet",
+      vetStatus: role === "vet" ? "approved" : null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      subscriptionTier: role === "vet" ? "trial" : "free",
+    });
+
+    console.log(`[Staff Service] Registro exitoso. Empleado ${displayName} asignado a sucursal ${branchId}`);
+
+    return {
+      success: true,
+      uid: uid,
+      displayName: displayName,
+    };
+  } catch (error: any) {
+    console.error("[Staff Service] Error en registerBranchStaff:", error);
+    if (error.code === "auth/email-already-exists") {
+      throw new HttpsError("already-exists", "Este correo electrónico ya está registrado.");
+    }
+    throw new HttpsError("internal", error.message || "Error al procesar el registro del staff.");
+  }
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRIGGER: Notificaciones FCM en cambios de estado de reservas de guardería
+//
+// Fires when boarding_reservations/{docId} transitions to:
+//   confirmed  → checked_in : "Tu mascota ha llegado a la guardería"
+//   checked_in → completed  : "Tu mascota está lista para ser recogida"
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function notifyBoardingStatusChange(
+  prefix: string,
+  beforeStatus: string,
+  afterStatus: string,
+  data: admin.firestore.DocumentData,
+): Promise<void> {
+  const ownerId = data.ownerId as string | undefined;
+  const petName = data.petName as string | undefined ?? "tu mascota";
+  const branchId = data.branchId as string | undefined;
+
+  if (!ownerId) return;
+
+  let title: string;
+  let body: string;
+  let notifType: string;
+
+  if (beforeStatus === "pending" && afterStatus === "confirmed") {
+    // Notify branch staff (caretakers, groomers, receptionists) of new confirmed reservation
+    if (branchId) {
+      const staffSnap = await db.collection(`${prefix}users`)
+        .where("branchId", "==", branchId)
+        .where("role", "in", ["caretaker", "groomer", "receptionist"])
+        .get();
+
+      const checkInDate = data.checkInExpected?.toDate?.();
+      const dateStr = checkInDate
+        ? `${checkInDate.getDate().toString().padStart(2, "0")}/${(checkInDate.getMonth() + 1).toString().padStart(2, "0")}`
+        : "próximamente";
+
+      const staffTitle = "Nueva reserva confirmada";
+      const staffBody = `${petName} llegará el ${dateStr}. Revisa tu panel para los detalles.`;
+
+      await Promise.allSettled(staffSnap.docs.map(async (staffDoc) => {
+        await staffDoc.ref.collection("notifications").add({
+          type: "boarding_new_confirmed",
+          message: staffBody,
+          petId: data.petId ?? "",
+          petName,
+          read: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        const fcmToken = staffDoc.data()?.fcmToken as string | undefined;
+        if (fcmToken) {
+          await admin.messaging().send({
+            token: fcmToken,
+            notification: { title: staffTitle, body: staffBody },
+            data: { petId: data.petId ?? "", type: "boarding_new_confirmed" },
+            android: { notification: { channelId: "petcare_boarding", priority: "default" } },
+            apns: { payload: { aps: { sound: "default" } } },
+          }).catch((e) => console.warn("[FCM Boarding Staff]", e));
+        }
+      }));
+      console.log(`[FCM Boarding] Notificados ${staffSnap.size} staff de sucursal ${branchId}`);
+    }
+    return;
+  } else if (beforeStatus === "confirmed" && afterStatus === "checked_in") {
+    title = "¡Tu mascota llegó!";
+    body = `${petName} ha ingresado a la guardería. Recibirás una notificación cuando esté lista.`;
+    notifType = "boarding_checked_in";
+  } else if (beforeStatus === "checked_in" && afterStatus === "completed") {
+    title = "¡Tu mascota está lista!";
+    body = `${petName} ya puede ser recogida en la guardería.`;
+    notifType = "boarding_completed";
+  } else {
+    return;
+  }
+
+  // Persist in-app notification for owner
+  await db.collection(`${prefix}users`).doc(ownerId)
+    .collection("notifications")
+    .add({
+      type: notifType,
+      message: body,
+      petId: data.petId ?? "",
+      petName,
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+  // FCM push (best-effort)
+  try {
+    const ownerDoc = await db.collection(`${prefix}users`).doc(ownerId).get();
+    const fcmToken = ownerDoc.data()?.fcmToken as string | undefined;
+    if (fcmToken) {
+      await admin.messaging().send({
+        token: fcmToken,
+        notification: { title, body },
+        data: { petId: data.petId ?? "", type: notifType },
+        android: { notification: { channelId: "petcare_boarding", priority: "high" } },
+        apns: { payload: { aps: { sound: "default" } } },
+      });
+    }
+  } catch (fcmErr) {
+    console.warn("[FCM Boarding] Error enviando push:", fcmErr);
+  }
+}
+
+export const onBoardingReservationUpdatedV2 = onDocumentUpdated(
+  "boarding_reservations/{docId}",
+  async (event) => {
+    const change = event.data;
+    if (!change) return;
+    const before = change.before.data();
+    const after = change.after.data();
+    if (!before || !after || before.status === after.status) return;
+    await notifyBoardingStatusChange("", before.status, after.status, after);
+  }
+);
+
+export const onBoardingReservationUpdatedDemo = onDocumentUpdated(
+  "demo_boarding_reservations/{docId}",
+  async (event) => {
+    const change = event.data;
+    if (!change) return;
+    const before = change.before.data();
+    const after = change.after.data();
+    if (!before || !after || before.status === after.status) return;
+    await notifyBoardingStatusChange("demo_", before.status, after.status, after);
+  }
+);
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULER: Limpieza automática de pending_links expirados
+//
+// Corre cada hora. Elimina en batch todos los documentos de pending_links
+// donde expiresAt < now (hayan sido canjeados o no). Reduce superficie de
+// exposición de petIds y libera almacenamiento.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const cleanupExpiredLinkCodes = onSchedule("every 60 minutes", async () => {
+  const now = admin.firestore.Timestamp.now();
+
+  async function purgeExpiredCodes(collection: string): Promise<number> {
+    const snap = await db.collection(collection)
+      .where("expiresAt", "<", now)
+      .limit(400)
+      .get();
+    if (snap.empty) return 0;
+    const batch = db.batch();
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+    return snap.size;
+  }
+
+  const [prod, demo] = await Promise.all([
+    purgeExpiredCodes("pending_links"),
+    purgeExpiredCodes("demo_pending_links"),
+  ]);
+  console.log(`[Cleanup] pending_links expirados eliminados — prod: ${prod}, demo: ${demo}`);
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULER: Notificación al dueño cuando el código PET-XXXX está por expirar
+//
+// Corre cada 5 minutos. Busca códigos no canjeados que expiran en la ventana
+// [ahora, ahora + 6 min]. Envía un push FCM único al dueño de la mascota para
+// que entregue el código antes de que caduque.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const notifyExpiringLinkCodes = onSchedule("every 5 minutes", async () => {
+  const now = admin.firestore.Timestamp.now();
+  const windowEnd = admin.firestore.Timestamp.fromMillis(now.toMillis() + 6 * 60 * 1000);
+
+  async function notifyExpiring(petsCollection: string, linksCollection: string, usersCollection: string): Promise<void> {
+    const snap = await db.collection(linksCollection)
+      .where("redeemed", "==", false)
+      .where("expiresAt", ">", now)
+      .where("expiresAt", "<=", windowEnd)
+      .get();
+
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      const petId = data.petId as string | undefined;
+      if (!petId) continue;
+
+      // Obtener ownerId desde la mascota
+      const petDoc = await db.collection(petsCollection).doc(petId).get();
+      if (!petDoc.exists) continue;
+      const ownerId = petDoc.data()?.ownerId as string | undefined;
+      if (!ownerId) continue;
+
+      // Solo enviar si el dueño tiene FCM token
+      const ownerDoc = await db.collection(usersCollection).doc(ownerId).get();
+      const fcmToken = ownerDoc.data()?.fcmToken as string | undefined;
+      if (!fcmToken) continue;
+
+      try {
+        await admin.messaging().send({
+          token: fcmToken,
+          notification: {
+            title: "Código PET expirando",
+            body: `Tu código ${data.code ?? doc.id} vence en menos de 6 minutos. Ingrésalo ahora para vincular tu mascota.`,
+          },
+          data: { type: "link_code_expiring", code: data.code ?? doc.id },
+          android: { notification: { channelId: "petcare_alerts", priority: "high" } },
+          apns: { payload: { aps: { sound: "default" } } },
+        });
+        console.log(`[FCM] Notif de expiración enviada al dueño ${ownerId} para código ${doc.id}`);
+      } catch (e) {
+        console.warn(`[FCM] Error notificando expiración para ${doc.id}:`, e);
+      }
+    }
+  }
+
+  await Promise.all([
+    notifyExpiring("pets", "pending_links", "users"),
+    notifyExpiring("demo_pets", "demo_pending_links", "demo_users"),
+  ]);
+});
 

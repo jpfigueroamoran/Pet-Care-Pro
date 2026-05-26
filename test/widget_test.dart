@@ -24,7 +24,7 @@ class FakeAuthNotifier extends AuthNotifier {
   }
 
   @override
-  Future<void> register(String name, String email, String password, UserRole role, String? license) async {
+  Future<void> register(String name, String email, String password, UserRole role, String? license, {String? branchName}) async {
     state = state.copyWith(isLoading: true, errorMessage: null);
     await Future.delayed(const Duration(milliseconds: 10));
     state = AuthState(
@@ -33,6 +33,7 @@ class FakeAuthNotifier extends AuthNotifier {
         email: email,
         displayName: name,
         role: role,
+        branchId: branchName,
         professionalLicense: license,
       ),
       isLoading: false,

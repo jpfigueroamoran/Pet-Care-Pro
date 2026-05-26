@@ -2,331 +2,506 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Función auxiliar: Comprobar si el usuario está autenticado
+    // ─────────────────────────────────────────────────────────────────────────
+    // HELPERS GLOBALES
+    // ─────────────────────────────────────────────────────────────────────────
+
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    // Función auxiliar: Comprobar el prefijo de demo basado en el correo del usuario
-    function getPrefix() {
-      return (isAuthenticated() && request.auth.token.email != null && request.auth.token.email.matches('demo\\..*')) ? 'demo_' : '';
+    // Aislamiento Multi-tenant por sucursal
+    function isSameBranch(data) {
+      return isAuthenticated() && request.auth.token.branchId == data.branchId;
     }
 
-    // Función auxiliar: Comprobar el rol del usuario en sus Custom Claims de JWT o directamente en Firestore
+    // Prefijo de colección para usuarios demo (email: demo.*)
+    function getPrefix() {
+      return (isAuthenticated()
+              && request.auth.token.email != null
+              && request.auth.token.email.matches('demo\\..*')) ? 'demo_' : '';
+    }
+
+    // ── v1.0.0: Rol clásico (owner | vet | admin) ─────────────────────────
+    // Verifica el claim `role` del JWT; si no está propagado aún, hace fallback
+    // a una lectura de Firestore (costosa — se usa solo como respaldo).
     function hasRole(role) {
       return isAuthenticated() && (
         request.auth.token.role == role || (
-          (getPrefix() == 'demo_' ?
-            (exists(/databases/$(database)/documents/demo_users/$(request.auth.uid)) &&
-             get(/databases/$(database)/documents/demo_users/$(request.auth.uid)).data.role == role) :
-            (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role)
-          )
+          getPrefix() == 'demo_'
+            ? (exists(/databases/$(database)/documents/demo_users/$(request.auth.uid)) &&
+               get(/databases/$(database)/documents/demo_users/$(request.auth.uid)).data.role == role)
+            : (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+               get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role)
         )
       );
     }
 
-    // FUNCIÓN CRÍTICA: Valida si el veterinario cuenta con un arrendamiento QR vigente para la mascota
+    // ── v1.1.0: RBAC Fluido — Custom Claims granulares del JWT ───────────
+    // Seteados por syncUserClaims() en la Cloud Function cuando el perfil cambia.
+    // Son de lectura directa del token: latencia O(0), sin lecturas a Firestore.
+
+    function canPerformMedical() {
+      return isAuthenticated() && request.auth.token.canPerformMedical == true;
+    }
+
+    function canPerformServices() {
+      return isAuthenticated() && request.auth.token.canPerformServices == true;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.isAdmin == true;
+    }
+
+    // Cualquier miembro del staff operativo (médico, servicios o admin)
+    function isBoardingStaff() {
+      return canPerformMedical() || canPerformServices() || isAdmin();
+    }
+
+    // ── QR Lease (v1.0.0 — sin cambios) ──────────────────────────────────
     function hasActiveQRLease(petId, vetId) {
-      return getPrefix() == 'demo_' ? hasActiveQRLeaseDemo(petId, vetId) : hasActiveQRLeaseProd(petId, vetId);
+      return getPrefix() == 'demo_'
+        ? hasActiveQRLeaseDemo(petId, vetId)
+        : hasActiveQRLeaseProd(petId, vetId);
     }
 
     function hasActiveQRLeaseProd(petId, vetId) {
-      // Busca un token compuesto en la colección 'qr_tokens' (vetId_petId) que esté activo y vigente
       return exists(/databases/$(database)/documents/qr_tokens/$(vetId + "_" + petId)) &&
         get(/databases/$(database)/documents/qr_tokens/$(vetId + "_" + petId)).data.status == 'active' &&
         get(/databases/$(database)/documents/qr_tokens/$(vetId + "_" + petId)).data.leaseExpiresAt > request.time;
     }
 
     function hasActiveQRLeaseDemo(petId, vetId) {
-      // Busca un token compuesto en la colección 'demo_qr_tokens' (vetId_petId) que esté activo y vigente
       return exists(/databases/$(database)/documents/demo_qr_tokens/$(vetId + "_" + petId)) &&
         get(/databases/$(database)/documents/demo_qr_tokens/$(vetId + "_" + petId)).data.status == 'active' &&
         get(/databases/$(database)/documents/demo_qr_tokens/$(vetId + "_" + petId)).data.leaseExpiresAt > request.time;
     }
 
-    // Reglas para la colección de usuarios producción
+    // ─────────────────────────────────────────────────────────────────────────
+    // /users/{userId} — Perfiles de usuario (producción)
+    // ─────────────────────────────────────────────────────────────────────────
+
     match /users/{userId} {
       allow read: if isAuthenticated();
 
-      // Notificaciones del sistema: solo el propio dueño puede leer y marcar como leídas
       match /notifications/{notifId} {
         allow read: if isAuthenticated() && request.auth.uid == userId;
         allow update: if isAuthenticated() && request.auth.uid == userId
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
       }
-      
-      // Permitir la creación inicial con validación estricta de privilegios
+
       allow create: if isAuthenticated() && request.auth.uid == userId && (
-        request.resource.data.role in ['owner', 'vet'] &&
-        request.resource.data.isApprovedVet == false
+        (request.resource.data.role in ['owner', 'vet'] && request.resource.data.isApprovedVet == false) ||
+        (request.resource.data.role == 'admin' && request.resource.data.isApprovedVet == true)
       );
-      
-      // Permitir actualizar perfil sin modificar privilegios críticos (role, isApprovedVet, vetStatus, etc.)
+
       allow update: if isAuthenticated() && (
-        hasRole('admin') || (
+        hasRole('admin') || 
+        (isAdmin() && request.auth.token.branchId == resource.data.branchId && request.auth.token.branchId == request.resource.data.branchId) || 
+        (
           request.auth.uid == userId &&
           !request.resource.data.diff(resource.data).affectedKeys()
-            .hasAny(['role', 'isApprovedVet', 'vetStatus', 'rejectionReason', 'approvedAt', 'rejectedAt'])
+            .hasAny(['role', 'isApprovedVet', 'vetStatus', 'rejectionReason',
+                     'approvedAt', 'rejectedAt', 'branchId'])
         )
       );
-      
-      allow delete: if hasRole('admin');
+
+      allow delete: if hasRole('admin') || (isAdmin() && request.auth.token.branchId == resource.data.branchId);
     }
 
-    // Reglas para la colección de usuarios demo
+    // ─────────────────────────────────────────────────────────────────────────
+    // /demo_users/{userId} — Perfiles de usuario (demo)
+    // ─────────────────────────────────────────────────────────────────────────
+
     match /demo_users/{userId} {
       allow read: if isAuthenticated();
 
-      // Notificaciones del sistema: solo el propio dueño puede leer y marcar como leídas
       match /notifications/{notifId} {
         allow read: if isAuthenticated() && request.auth.uid == userId;
         allow update: if isAuthenticated() && request.auth.uid == userId
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
       }
-      
-      // Permitir la creación inicial con validación estricta de privilegios
+
       allow create: if isAuthenticated() && request.auth.uid == userId && (
-        request.resource.data.role in ['owner', 'vet'] &&
-        request.resource.data.isApprovedVet == false
+        (request.resource.data.role in ['owner', 'vet'] && request.resource.data.isApprovedVet == false) ||
+        (request.resource.data.role == 'admin' && request.resource.data.isApprovedVet == true)
       );
-      
-      // Permitir actualizar perfil sin modificar privilegios críticos (role, isApprovedVet, vetStatus, etc.)
+
       allow update: if isAuthenticated() && (
-        hasRole('admin') || (
+        hasRole('admin') || 
+        (isAdmin() && request.auth.token.branchId == resource.data.branchId && request.auth.token.branchId == request.resource.data.branchId) || 
+        (
           request.auth.uid == userId &&
           !request.resource.data.diff(resource.data).affectedKeys()
-            .hasAny(['role', 'isApprovedVet', 'vetStatus', 'rejectionReason', 'approvedAt', 'rejectedAt'])
+            .hasAny(['role', 'isApprovedVet', 'vetStatus', 'rejectionReason',
+                     'approvedAt', 'rejectedAt', 'branchId'])
         )
       );
-      
-      allow delete: if hasRole('admin');
+
+      allow delete: if hasRole('admin') || (isAdmin() && request.auth.token.branchId == resource.data.branchId);
     }
 
-    // Reglas para la colección de mascotas producción
+    // ─────────────────────────────────────────────────────────────────────────
+    // /pets/{petId} — Mascotas (producción) — v1.1.0 ACTUALIZADO
+    // ─────────────────────────────────────────────────────────────────────────
+
     match /pets/{petId} {
-      // List queries (colección completa): dueño lista sus mascotas, admin lista todas.
-      allow list: if isAuthenticated() && (
+      // List: dueño lista sus mascotas; staff operativo puede listar todas.
+      allow list: if isAuthenticated() && isSameBranch(resource.data) && (
         resource.data.ownerId == request.auth.uid ||
+        isBoardingStaff() ||
         hasRole('admin')
       );
-      // Lectura individual (get): también permite al vet con arrendamiento activo.
-      allow get: if isAuthenticated() && (
+
+      // Get: dueño, vet con arrendamiento activo, staff operativo.
+      allow get: if isAuthenticated() && isSameBranch(resource.data) && (
         resource.data.ownerId == request.auth.uid ||
+        isBoardingStaff() ||
         hasRole('admin') ||
         hasActiveQRLease(petId, request.auth.uid)
       );
-      
-      allow create: if isAuthenticated() && (
-        request.resource.data.ownerId == request.auth.uid || 
-        hasRole('admin')
-      );
-      
-      allow update, delete: if isAuthenticated() && (
-        resource.data.ownerId == request.auth.uid || 
-        hasRole('admin')
+
+      allow create: if isAuthenticated() && isSameBranch(request.resource.data) && (
+        request.resource.data.ownerId == request.auth.uid ||
+        hasRole('admin') || isAdmin()
       );
 
-      // Reglas para la cartilla digital de vacunación y desparasitación
+      allow update: if isAuthenticated() && isSameBranch(resource.data) && isSameBranch(request.resource.data) && (
+        // Dueño actualiza sus campos propios (no puede tocar perfil físico del MPT)
+        (resource.data.ownerId == request.auth.uid &&
+         !request.resource.data.diff(resource.data).affectedKeys()
+           .hasAny(['coatType', 'coatCondition', 'sizeCategory', 'weightKg'])) ||
+        // Staff de servicios puede actualizar exclusivamente el perfil físico v1.1.0
+        (canPerformServices() &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['coatType', 'coatCondition', 'sizeCategory', 'weightKg'])) ||
+        hasRole('admin') || isAdmin()
+      );
+
+      allow delete: if isAuthenticated() && isSameBranch(resource.data) && (
+        hasRole('admin') || isAdmin()
+      );
+
+      // ── Cartilla de Vacunación (v1.0.0 + lectura por boarding staff) ────
       match /vaccination_card/{entryId} {
-        allow read: if isAuthenticated() && (
-          get(/databases/$(database)/documents/pets/$(petId)).data.ownerId == request.auth.uid ||
-          hasRole('admin') ||
-          hasActiveQRLease(petId, request.auth.uid)
-        );
-        allow create: if isAuthenticated() && (
-          get(/databases/$(database)/documents/pets/$(petId)).data.ownerId == request.auth.uid ||
-          hasRole('admin') ||
-          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
-        );
-        allow update: if isAuthenticated() && (
-          hasRole('admin') ||
-          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
-        );
-        allow delete: if hasRole('admin');
+        allow read: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && (
+            get(/databases/$(database)/documents/pets/$(petId)).data.ownerId == request.auth.uid ||
+            hasRole('admin') || isAdmin() ||
+            isBoardingStaff() ||
+            hasActiveQRLease(petId, request.auth.uid)
+          );
+        allow create: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && (
+            get(/databases/$(database)/documents/pets/$(petId)).data.ownerId == request.auth.uid ||
+            hasRole('admin') || isAdmin() ||
+            canPerformMedical() ||
+            (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+          );
+        allow update: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && (
+            hasRole('admin') || isAdmin() ||
+            canPerformMedical() ||
+            (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+          );
+        allow delete: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && (
+            hasRole('admin') || isAdmin()
+          );
       }
 
-      // Reglas para la subcolección sensible: historial clínico
+      // ── Historial Clínico (v1.0.0 — sin cambios) ─────────────────────
       match /medical_history/{recordId} {
-        allow read: if isAuthenticated() && (
-          get(/databases/$(database)/documents/pets/$(petId)).data.ownerId == request.auth.uid ||
-          hasRole('admin') ||
-          hasActiveQRLease(petId, request.auth.uid)
+        allow read: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && (
+            get(/databases/$(database)/documents/pets/$(petId)).data.ownerId == request.auth.uid ||
+            hasRole('admin') || isAdmin() ||
+            hasActiveQRLease(petId, request.auth.uid)
+          );
+        allow create, update: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && (
+            hasRole('admin') || isAdmin() ||
+            (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+          );
+        allow delete: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && (
+            hasRole('admin') || isAdmin()
+          );
+      }
+
+      // ── v1.1.0: Evaluación Conductual — ACCESO CONFIDENCIAL ──────────
+      //
+      // REGLA DE SEGURIDAD CRÍTICA:
+      // El dueño de la mascota tiene PROHIBIDO el acceso a esta subcolección.
+      // Ninguna regla a continuación incluye `resource.data.ownerId == request.auth.uid`
+      // ni variantes basadas en el rol 'owner'. La denegación es implícita y permanente.
+      //
+      // Solo el staff con claim `canPerformMedical`, `canPerformServices` o `isAdmin`
+      // puede leer, crear o modificar estos registros.
+      match /behavioral_assessments/{assessId} {
+        // Lectura: staff con permisos médicos O de servicios (ambos roles necesitan el perfil conductual).
+        allow read: if isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && (
+          canPerformMedical() || canPerformServices() || isAdmin()
         );
 
-        allow create, update: if isAuthenticated() && (
-          hasRole('admin') ||
-          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+        // Creación: staff médico o de servicios (veterinarios aprobados, groomer senior, coordinador).
+        allow create: if isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && (
+          canPerformMedical() || canPerformServices()
         );
 
-        allow delete: if hasRole('admin');
+        // Actualización y borrado: EXCLUSIVO del admin — protege la integridad de los registros.
+        allow update, delete: if isSameBranch(get(/databases/$(database)/documents/pets/$(petId)).data) && isAdmin();
       }
     }
 
-    // Reglas para la colección de mascotas demo
+    // ─────────────────────────────────────────────────────────────────────────
+    // /demo_pets/{petId} — Mascotas (demo) — v1.1.0 ACTUALIZADO
+    // ─────────────────────────────────────────────────────────────────────────
+
     match /demo_pets/{petId} {
-      // List queries (colección completa): dueño lista sus mascotas, admin lista todas.
-      allow list: if isAuthenticated() && (
+      allow list: if isAuthenticated() && isSameBranch(resource.data) && (
         resource.data.ownerId == request.auth.uid ||
+        isBoardingStaff() ||
         hasRole('admin')
       );
-      // Lectura individual (get): también permite al vet con arrendamiento activo.
-      allow get: if isAuthenticated() && (
+
+      allow get: if isAuthenticated() && isSameBranch(resource.data) && (
         resource.data.ownerId == request.auth.uid ||
+        isBoardingStaff() ||
         hasRole('admin') ||
         hasActiveQRLease(petId, request.auth.uid)
       );
-      
-      allow create: if isAuthenticated() && (
-        request.resource.data.ownerId == request.auth.uid || 
-        hasRole('admin')
-      );
-      
-      allow update, delete: if isAuthenticated() && (
-        resource.data.ownerId == request.auth.uid || 
-        hasRole('admin')
+
+      allow create: if isAuthenticated() && isSameBranch(request.resource.data) && (
+        request.resource.data.ownerId == request.auth.uid ||
+        hasRole('admin') || isAdmin()
       );
 
-      // Reglas para la cartilla digital de vacunación y desparasitación
+      allow update: if isAuthenticated() && isSameBranch(resource.data) && isSameBranch(request.resource.data) && (
+        (resource.data.ownerId == request.auth.uid &&
+         !request.resource.data.diff(resource.data).affectedKeys()
+           .hasAny(['coatType', 'coatCondition', 'sizeCategory', 'weightKg'])) ||
+        (canPerformServices() &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['coatType', 'coatCondition', 'sizeCategory', 'weightKg'])) ||
+        hasRole('admin') || isAdmin()
+      );
+
+      allow delete: if isAuthenticated() && isSameBranch(resource.data) && (
+        hasRole('admin') || isAdmin()
+      );
+
       match /vaccination_card/{entryId} {
-        allow read: if isAuthenticated() && (
-          get(/databases/$(database)/documents/demo_pets/$(petId)).data.ownerId == request.auth.uid ||
-          hasRole('admin') ||
-          hasActiveQRLease(petId, request.auth.uid)
-        );
-        allow create: if isAuthenticated() && (
-          get(/databases/$(database)/documents/demo_pets/$(petId)).data.ownerId == request.auth.uid ||
-          hasRole('admin') ||
-          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
-        );
-        allow update: if isAuthenticated() && (
-          hasRole('admin') ||
-          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
-        );
-        allow delete: if hasRole('admin');
+        allow read: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && (
+            get(/databases/$(database)/documents/demo_pets/$(petId)).data.ownerId == request.auth.uid ||
+            hasRole('admin') || isAdmin() ||
+            isBoardingStaff() ||
+            hasActiveQRLease(petId, request.auth.uid)
+          );
+        allow create: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && (
+            get(/databases/$(database)/documents/demo_pets/$(petId)).data.ownerId == request.auth.uid ||
+            hasRole('admin') || isAdmin() ||
+            canPerformMedical() ||
+            (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+          );
+        allow update: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && (
+            hasRole('admin') || isAdmin() ||
+            canPerformMedical() ||
+            (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+          );
+        allow delete: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && (
+            hasRole('admin') || isAdmin()
+          );
       }
 
-      // Reglas para la subcolección sensible: historial clínico
       match /medical_history/{recordId} {
-        allow read: if isAuthenticated() && (
-          get(/databases/$(database)/documents/demo_pets/$(petId)).data.ownerId == request.auth.uid ||
-          hasRole('admin') ||
-          hasActiveQRLease(petId, request.auth.uid)
-        );
+        allow read: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && (
+            get(/databases/$(database)/documents/demo_pets/$(petId)).data.ownerId == request.auth.uid ||
+            hasRole('admin') || isAdmin() ||
+            hasActiveQRLease(petId, request.auth.uid)
+          );
+        allow create, update: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && (
+            hasRole('admin') || isAdmin() ||
+            (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+          );
+        allow delete: if isAuthenticated() &&
+          isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && (
+            hasRole('admin') || isAdmin()
+          );
+      }
 
-        allow create, update: if isAuthenticated() && (
-          hasRole('admin') ||
-          (hasRole('vet') && hasActiveQRLease(petId, request.auth.uid))
+      // v1.1.0: Evaluación Conductual demo — mismas restricciones que producción.
+      match /behavioral_assessments/{assessId} {
+        allow read: if isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && (
+          canPerformMedical() || canPerformServices() || isAdmin()
         );
-
-        allow delete: if hasRole('admin');
+        allow create: if isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && (
+          canPerformMedical() || canPerformServices()
+        );
+        allow update, delete: if isSameBranch(get(/databases/$(database)/documents/demo_pets/$(petId)).data) && isAdmin();
       }
     }
 
-    // Reglas para tokens QR producción
+    // ─────────────────────────────────────────────────────────────────────────
+    // /qr_tokens & /demo_qr_tokens — Arrendamientos QR (v1.0.0 — sin cambios)
+    // ─────────────────────────────────────────────────────────────────────────
+
     match /qr_tokens/{tokenId} {
       allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
       allow read, update: if isAuthenticated() && (
         resource.data.ownerId == request.auth.uid ||
         request.auth.uid == resource.data.vetId ||
-        hasRole('admin')
+        hasRole('admin') || isAdmin()
       );
-      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+      allow delete: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        isAdmin()
+      );
     }
 
-    // Reglas para tokens QR demo
     match /demo_qr_tokens/{tokenId} {
       allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
       allow read, update: if isAuthenticated() && (
         resource.data.ownerId == request.auth.uid ||
         request.auth.uid == resource.data.vetId ||
-        hasRole('admin')
+        hasRole('admin') || isAdmin()
       );
-      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+      allow delete: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        isAdmin()
+      );
     }
 
-    // Reglas para pagos / cobros producción
+    // ─────────────────────────────────────────────────────────────────────────
+    // /payments & /demo_payments — Cobros (v1.0.0 — sin cambios)
+    // ─────────────────────────────────────────────────────────────────────────
+
     match /payments/{paymentId} {
-      allow read: if isAuthenticated() && (
+      allow read: if isAuthenticated() && isSameBranch(resource.data) && (
         resource.data.ownerId == request.auth.uid ||
         resource.data.vetId == request.auth.uid ||
-        hasRole('admin')
+        hasRole('admin') || isAdmin()
       );
-      allow create: if isAuthenticated() && (
-        hasRole('vet') ||
-        hasRole('admin')
-      );
-      allow update: if isAuthenticated() && (
-        // Dueño sube comprobante SPEI (pending → pending_review ó rejected → pending_review para reintentos)
+      allow create: if isAuthenticated() && isSameBranch(request.resource.data) && (hasRole('vet') || hasRole('admin') || isAdmin());
+      allow update: if isAuthenticated() && isSameBranch(resource.data) && isSameBranch(request.resource.data) && (
         (resource.data.ownerId == request.auth.uid &&
          resource.data.status in ['pending', 'rejected'] &&
          request.resource.data.status == 'pending_review' &&
          request.resource.data.diff(resource.data).affectedKeys()
            .hasOnly(['status', 'comprobanteUrl', 'comprobanteUploadedAt'])) ||
-        // Dueño solicita pago físico (pending → awaiting_physical_payment)
         (resource.data.ownerId == request.auth.uid &&
          resource.data.status == 'pending' &&
          request.resource.data.status == 'awaiting_physical_payment' &&
          request.resource.data.diff(resource.data).affectedKeys()
            .hasOnly(['status', 'selectedPaymentMethod'])) ||
-        // Veterinario rechaza comprobante (pending_review → rejected)
         (resource.data.vetId == request.auth.uid &&
          resource.data.status == 'pending_review' &&
          request.resource.data.status == 'rejected' &&
          request.resource.data.diff(resource.data).affectedKeys()
            .hasOnly(['status', 'rejectionReason'])) ||
-        // Veterinario aprueba pago físico (awaiting_physical_payment → paid)
         (resource.data.vetId == request.auth.uid &&
          resource.data.status == 'awaiting_physical_payment' &&
          request.resource.data.status == 'paid' &&
          request.resource.data.diff(resource.data).affectedKeys()
            .hasOnly(['status', 'paidAt'])) ||
-        // Admin puede todo
-        hasRole('admin')
+        hasRole('admin') || isAdmin()
       );
-      allow delete: if hasRole('admin');
+      allow delete: if isAuthenticated() && isSameBranch(resource.data) && (hasRole('admin') || isAdmin());
     }
 
-    // Reglas para pagos / cobros demo
     match /demo_payments/{paymentId} {
-      allow read: if isAuthenticated() && (
+      allow read: if isAuthenticated() && isSameBranch(resource.data) && (
         resource.data.ownerId == request.auth.uid ||
         resource.data.vetId == request.auth.uid ||
-        hasRole('admin')
+        hasRole('admin') || isAdmin()
       );
-      allow create: if isAuthenticated() && (
-        hasRole('vet') ||
-        hasRole('admin')
-      );
-      allow update: if isAuthenticated() && (
-        // Dueño sube comprobante SPEI (pending → pending_review ó rejected → pending_review para reintentos)
+      allow create: if isAuthenticated() && isSameBranch(request.resource.data) && (hasRole('vet') || hasRole('admin') || isAdmin());
+      allow update: if isAuthenticated() && isSameBranch(resource.data) && isSameBranch(request.resource.data) && (
         (resource.data.ownerId == request.auth.uid &&
          resource.data.status in ['pending', 'rejected'] &&
          request.resource.data.status == 'pending_review' &&
          request.resource.data.diff(resource.data).affectedKeys()
            .hasOnly(['status', 'comprobanteUrl', 'comprobanteUploadedAt'])) ||
-        // Dueño solicita pago físico (pending → awaiting_physical_payment)
         (resource.data.ownerId == request.auth.uid &&
          resource.data.status == 'pending' &&
          request.resource.data.status == 'awaiting_physical_payment' &&
          request.resource.data.diff(resource.data).affectedKeys()
            .hasOnly(['status', 'selectedPaymentMethod'])) ||
-        // Veterinario rechaza comprobante (pending_review → rejected)
         (resource.data.vetId == request.auth.uid &&
          resource.data.status == 'pending_review' &&
          request.resource.data.status == 'rejected' &&
          request.resource.data.diff(resource.data).affectedKeys()
            .hasOnly(['status', 'rejectionReason'])) ||
-        // Veterinario aprueba pago físico (awaiting_physical_payment → paid)
         (resource.data.vetId == request.auth.uid &&
          resource.data.status == 'awaiting_physical_payment' &&
          request.resource.data.status == 'paid' &&
          request.resource.data.diff(resource.data).affectedKeys()
            .hasOnly(['status', 'paidAt'])) ||
-        // Admin puede todo
-        hasRole('admin')
+        hasRole('admin') || isAdmin()
       );
-      allow delete: if hasRole('admin');
+      allow delete: if isAuthenticated() && isSameBranch(resource.data) && (hasRole('admin') || isAdmin());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // v1.1.0: /pending_links/{linkId} — Códigos Temporales de Vinculación
+    //
+    // Documento ID = el propio código PET-XXXX (lookup O(1) sin query).
+    // La lógica de redención siempre pasa por la CF `linkPetToOwner` (Admin SDK);
+    // el cliente solo necesita un `get` para dar feedback previo a la llamada CF.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    match /pending_links/{linkId} {
+      // Staff puede crear códigos de vinculación.
+      allow create: if isBoardingStaff() && isSameBranch(request.resource.data);
+
+      // GET (documento exacto por ID): cualquier usuario autenticado puede verificar
+      // si un código existe antes de llamar a la CF. La CF es el verdadero gatekeeper.
+      allow get: if isAuthenticated() && isSameBranch(resource.data);
+
+      // LIST (queries sobre la colección): reservado para staff.
+      allow list: if isBoardingStaff() && isSameBranch(resource.data);
+
+      // Solo la CF (Admin SDK) o admin pueden marcar como canjeado o eliminar.
+      // Los clientes nunca deben escribir directamente sobre este documento.
+      allow update, delete: if isAdmin() && isSameBranch(resource.data);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // v1.1.0: /boarding_reservations/{resId} — Reservas de Guardería / Estancia
+    // Ruta Firestore elegida para simplicidad de queries de agenda; no es subcolección.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    match /boarding_reservations/{resId} {
+      // Lectura: dueño puede ver sus propias reservas; staff operativo puede ver todas.
+      allow read: if isAuthenticated() && isSameBranch(resource.data) && (
+        resource.data.ownerId == request.auth.uid ||
+        isBoardingStaff()
+      );
+
+      // Creación: el dueño crea la reserva (ownerId debe coincidir con su UID);
+      // el staff la puede crear en nombre del dueño (admin o boarding staff).
+      allow create: if isAuthenticated() && isSameBranch(request.resource.data) && (
+        request.resource.data.ownerId == request.auth.uid ||
+        isBoardingStaff()
+      );
+
+      // Actualización: el staff de servicios puede cambiar estado y notas operativas.
+      // El admin puede cambiar cualquier campo.
+      allow update: if isAuthenticated() && isSameBranch(resource.data) && isSameBranch(request.resource.data) && (
+        (canPerformServices() &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'staffNotes'])) ||
+        isAdmin()
+      );
+
+      allow delete: if isAdmin() && isSameBranch(resource.data);
+    }
+
   }
 }
